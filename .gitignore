@@ -6,6 +6,8 @@
 .env
 secrets/
 secrets_local.py
+streamlit_secrets.toml
+STREAMLIT_SECRETS_COPY_PASTE.txt
 
 # Python
 __pycache__/

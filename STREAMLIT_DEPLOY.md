@@ -35,6 +35,8 @@ your_private_key_content_here
 UNABATED_API_KEY = "your_unabated_api_key"
 ```
 
+**Important**: Paste the secrets WITHOUT any section header (no `[secrets]` line). Streamlit Cloud expects root-level keys.
+
 **Important Notes:**
 - The `KALSHI_PRIVATE_KEY_PEM` should include the full PEM-formatted key including the `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` lines
 - Keep the triple quotes (`"""`) around the private key value

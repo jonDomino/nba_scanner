@@ -4,8 +4,37 @@ Streamlit app for NBA Moneylines Dashboard.
 This app embeds the existing HTML dashboard into Streamlit using st.components.v1.html.
 """
 
+import os
 import streamlit as st
 from datetime import datetime
+
+# Export Streamlit secrets as environment variables (before importing other modules)
+# This makes them available to os.getenv() calls in the rest of the codebase
+# In Streamlit Cloud, secrets are available via st.secrets
+try:
+    if hasattr(st, 'secrets'):
+        secrets = st.secrets
+        # Read secrets and export as environment variables
+        # Each access is wrapped in try-except to handle missing keys gracefully
+        try:
+            os.environ['KALSHI_API_KEY_ID'] = str(secrets['KALSHI_API_KEY_ID'])
+        except (KeyError, AttributeError, TypeError):
+            pass
+        
+        try:
+            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(secrets['KALSHI_PRIVATE_KEY_PEM'])
+        except (KeyError, AttributeError, TypeError):
+            pass
+        
+        try:
+            os.environ['UNABATED_API_KEY'] = str(secrets['UNABATED_API_KEY'])
+        except (KeyError, AttributeError, TypeError):
+            pass
+except Exception:
+    # Secrets not available (e.g., local testing without secrets.toml)
+    # Environment variables or local files will be used instead
+    pass
+
 from orchestrator_moneylines import build_moneylines_rows, build_dashboard_html_moneylines
 
 # Configure Streamlit page
