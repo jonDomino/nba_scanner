@@ -10,30 +10,20 @@ from datetime import datetime
 
 # Export Streamlit secrets as environment variables (before importing other modules)
 # This makes them available to os.getenv() calls in the rest of the codebase
-# In Streamlit Cloud, secrets are available via st.secrets
-try:
-    if hasattr(st, 'secrets'):
-        secrets = st.secrets
-        # Read secrets and export as environment variables
-        # Each access is wrapped in try-except to handle missing keys gracefully
-        try:
-            os.environ['KALSHI_API_KEY_ID'] = str(secrets['KALSHI_API_KEY_ID'])
-        except (KeyError, AttributeError, TypeError):
-            pass
-        
-        try:
-            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(secrets['KALSHI_PRIVATE_KEY_PEM'])
-        except (KeyError, AttributeError, TypeError):
-            pass
-        
-        try:
-            os.environ['UNABATED_API_KEY'] = str(secrets['UNABATED_API_KEY'])
-        except (KeyError, AttributeError, TypeError):
-            pass
-except Exception:
-    # Secrets not available (e.g., local testing without secrets.toml)
-    # Environment variables or local files will be used instead
-    pass
+# In Streamlit Cloud, secrets are available via st.secrets (works like a dict)
+if hasattr(st, 'secrets') and st.secrets:
+    try:
+        # Access secrets using dictionary-style (standard Streamlit pattern)
+        if 'KALSHI_API_KEY_ID' in st.secrets:
+            os.environ['KALSHI_API_KEY_ID'] = str(st.secrets['KALSHI_API_KEY_ID'])
+        if 'KALSHI_PRIVATE_KEY_PEM' in st.secrets:
+            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(st.secrets['KALSHI_PRIVATE_KEY_PEM'])
+        if 'UNABATED_API_KEY' in st.secrets:
+            os.environ['UNABATED_API_KEY'] = str(st.secrets['UNABATED_API_KEY'])
+    except (KeyError, AttributeError, TypeError) as e:
+        # Log the error but don't fail immediately - might be local dev
+        print(f"Note: Error reading Streamlit secrets: {e}")
+        print("Will attempt to use environment variables or local files instead")
 
 from orchestrator_moneylines import build_moneylines_rows, build_dashboard_html_moneylines
 
@@ -68,6 +58,21 @@ def get_cached_dashboard():
 def main():
     """Main Streamlit app function."""
     st.title("🏀 NBA Value Dashboard")
+    
+    # Debug: Check if secrets are loaded
+    # Check environment variables to verify secrets were set
+    if not os.getenv('UNABATED_API_KEY'):
+        st.error("❌ UNABATED_API_KEY not found in environment variables")
+        st.info("Please ensure secrets are configured in Streamlit Cloud: Settings → Secrets")
+        if hasattr(st, 'secrets'):
+            try:
+                available_keys = list(st.secrets.keys()) if hasattr(st.secrets, 'keys') else "Unable to read"
+                st.write("Available secrets keys:", available_keys)
+            except:
+                st.write("st.secrets exists but cannot read keys")
+        st.stop()
+    # Only show success message if we're debugging (can be removed later)
+    # st.success("✅ Secrets loaded successfully")
     
     # Sidebar with refresh controls
     with st.sidebar:
