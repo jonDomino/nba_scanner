@@ -15,26 +15,52 @@ Standalone project for scanning Kalshi NBA moneyline markets and outputting rank
 
 ## Setup
 
-1. Copy credential files to root:
-   - `kalshi_api_key_id.txt`
-   - `kalshi_private_key.pem`
-
-2. Create `team_xref_nba.csv` with format:
-   ```
-   league,unabated_name,kalshi_code
-   NBA,Los Angeles Lakers,LALLAL
-   NBA,Boston Celtics,BOSCEL
-   ...
-   ```
-
-3. Install dependencies:
+1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. Update `utils/config.py` with NBA-specific constants:
-   - `UNABATED_LEAGUE_ID_NBA`
-   - `KALSHI_NBA_SERIES_TICKER`
+2. Set up API credentials:
+
+   **Option A: Environment Variables (Recommended)**
+   ```bash
+   export TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+   export TELEGRAM_CHAT_ID="your_telegram_chat_id"
+   export UNABATED_API_KEY="your_unabated_api_key"
+   ```
+
+   **Option B: Create credential files (gitignored)**
+   - Create `kalshi_api_key_id.txt` with your Kalshi API key ID
+   - Create `kalshi_private_key.pem` with your Kalshi private key
+   - Update `utils/config.py` directly with Telegram and Unabated API keys (not recommended for production)
+
+3. The `team_xref_nba.csv` file is already included with all NBA team mappings.
+
+## Usage
+
+Run the main value scanner:
+```bash
+python nba_value_table.py
+```
+
+This will:
+- Fetch today's NBA games from Unabated
+- Get Kalshi orderbook data for each game
+- Calculate expected value for maker-posting scenarios
+- Display results in a browser dashboard with HTML table
+- Show console output with detailed table
+
+## Features
+
+- **Today's Games**: Automatically filters to games scheduled for today (PST/PDT)
+- **Value Calculation**: Seller/post-maker perspective EV calculations
+- **Dashboard**: HTML dashboard with:
+  - Liquidity bars (red-to-green gradient)
+  - Toggle between probabilities and American odds
+  - Highlighting for started games
+  - Hover tooltips for liquidity and odds descriptions
+- **Rotation Numbers**: Displays Unabated rotation numbers for each game
+- **Game Times**: Shows game start times in PST/PDT format
 
 ## Implementation Status
 
