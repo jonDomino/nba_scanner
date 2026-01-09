@@ -144,9 +144,11 @@ def format_ev_percent(ev_pct: Optional[float]) -> str:
     return f"{sign}{ev_pct:.1f}%"
 
 
-def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
+def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None) -> str:
     """
     Create HTML dashboard with dark theme matching the reference image.
+    
+    Includes both moneylines and spreads tables.
     
     Returns:
         HTML content as string
@@ -192,6 +194,17 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
             text-align: center;
             border-bottom: 2px solid #333;
             padding-bottom: 15px;
+        }
+        
+        h2 {
+            color: #ffffff;
+            margin-top: 40px;
+            margin-bottom: 15px;
+            font-size: 20px;
+            font-weight: 600;
+            text-align: center;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
         }
         
         .toggle-button {
@@ -631,6 +644,126 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
     html_content += """
             </tbody>
         </table>
+"""
+    
+    # Add spreads table if provided
+    if spread_rows:
+        html_content += """
+        <h2>SPREADS</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Game Date</th>
+                    <th>Game Time</th>
+                    <th>ROTO</th>
+                    <th>Away Team</th>
+                    <th>Home Team</th>
+                    <th>Consensus</th>
+                    <th>Strike</th>
+                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Away Kalshi</th>
+                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Home Kalshi</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+        
+        # Find max liquidity for spreads scaling (from both away and home)
+        max_spread_liq = 0
+        for row in spread_rows:
+            away_liq = row.get('away_kalshi_liq')
+            home_liq = row.get('home_kalshi_liq')
+            if away_liq is not None and isinstance(away_liq, (int, float)):
+                max_spread_liq = max(max_spread_liq, away_liq)
+            if home_liq is not None and isinstance(home_liq, (int, float)):
+                max_spread_liq = max(max_spread_liq, home_liq)
+        
+        if max_spread_liq == 0:
+            max_spread_liq = 10000
+        
+        # Sort spreads by ROTO
+        spread_rows_sorted = sorted(spread_rows, key=lambda x: (
+            x.get('away_roto') is None,
+            x.get('away_roto') or 0,
+            x.get('game_date') or ''
+        ))
+        
+        for row in spread_rows_sorted:
+            # Format game time and check if started
+            event_start = row.get('event_start')
+            game_time_str = format_game_time_pst(event_start)
+            is_started = is_game_started(event_start)
+            row_class = "game-started" if is_started else ""
+            
+            # Format ROTO
+            away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
+            
+            # Format consensus
+            consensus_str = row.get('consensus', 'N/A')
+            
+            # Format strike
+            strike_str = row.get('strike', 'N/A')
+            
+            # Get Away/Home Kalshi values (now stored separately)
+            away_kalshi_val = row.get('away_kalshi_prob')
+            home_kalshi_val = row.get('home_kalshi_prob')
+            away_kalshi_liq = row.get('away_kalshi_liq')
+            home_kalshi_liq = row.get('home_kalshi_liq')
+            
+            away_kalshi_str = f"{away_kalshi_val:.4f}" if away_kalshi_val is not None else "N/A"
+            home_kalshi_str = f"{home_kalshi_val:.4f}" if home_kalshi_val is not None else "N/A"
+            
+            # Format liquidity
+            away_kalshi_liq_str = format_liq_k(away_kalshi_liq)
+            home_kalshi_liq_str = format_liq_k(home_kalshi_liq)
+            
+            # Calculate bar percentages and gradients
+            away_kalshi_liq_pct = calc_liq_bar_pct(away_kalshi_liq, max_spread_liq)
+            home_kalshi_liq_pct = calc_liq_bar_pct(home_kalshi_liq, max_spread_liq)
+            away_kalshi_liq_gradient = calc_liq_gradient(away_kalshi_liq, max_spread_liq)
+            home_kalshi_liq_gradient = calc_liq_gradient(home_kalshi_liq, max_spread_liq)
+            
+            html_content += f"""
+                <tr class="{row_class}">
+                    <td class="date-cell">{row['game_date']}</td>
+                    <td class="date-cell">{game_time_str}</td>
+                    <td class="prob-value">{away_roto_str}</td>
+                    <td class="team-name">{row['away_team']}</td>
+                    <td class="team-name">{row['home_team']}</td>
+                    <td class="team-name">{consensus_str}</td>
+                    <td class="team-name">{strike_str}</td>
+"""
+            
+            # Away Kalshi cell (with liquidity bar if value exists)
+            if away_kalshi_val is not None:
+                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};" data-prob="{away_kalshi_val}" data-original="{away_kalshi_str}">
+                        <div class="kalshi-cell-content">{away_kalshi_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
+"""
+            else:
+                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{away_kalshi_str}">{away_kalshi_str}</td>
+"""
+            
+            # Home Kalshi cell (with liquidity bar if value exists)
+            if home_kalshi_val is not None:
+                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};" data-prob="{home_kalshi_val}" data-original="{home_kalshi_str}">
+                        <div class="kalshi-cell-content">{home_kalshi_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
+"""
+            else:
+                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{home_kalshi_str}">{home_kalshi_str}</td>
+"""
+            
+            html_content += f"""                </tr>
+"""
+        
+        html_content += """
+            </tbody>
+        </table>
+"""
+    
+    html_content += """
     </div>
 </body>
 </html>
@@ -639,11 +772,11 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
     return html_content
 
 
-def open_dashboard_in_browser(table_rows: List[Dict[str, Any]]):
+def open_dashboard_in_browser(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None):
     """
     Create HTML dashboard and open it in the default browser.
     """
-    html_content = create_html_dashboard(table_rows)
+    html_content = create_html_dashboard(table_rows, spread_rows)
     
     # Create temporary HTML file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
@@ -868,11 +1001,24 @@ def main():
             f"{home_ev_top_str:<13}"
         )
     
-    # Step 5: Open dashboard in browser window
-    open_dashboard_in_browser(table_rows)
+    # Step 5: Get spreads data (additive feature, zero impact on moneylines)
+    spread_rows = []
+    try:
+        from nba_spreads_dashboard import build_spreads_rows_for_today, print_spreads_table
+        spread_rows = build_spreads_rows_for_today()
+    except Exception as e:
+        # Silently ignore errors in spreads module (don't break moneylines)
+        print(f"\nNote: Spreads table unavailable ({e})\n")
+    
+    # Step 6: Open dashboard in browser window (with spreads if available)
+    open_dashboard_in_browser(table_rows, spread_rows if spread_rows else None)
     
     # Also print console version
     print_dashboard(table_rows)
+    
+    # Print spreads table if available
+    if spread_rows:
+        print_spreads_table(spread_rows)
 
 
 if __name__ == "__main__":
