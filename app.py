@@ -22,15 +22,22 @@ except ImportError:
 if hasattr(st, 'secrets'):
     try:
         # Try to access secrets - this may raise StreamlitSecretNotFoundError if no secrets file exists
-        # We need to trigger parsing carefully - check if secrets exist first
         secrets_dict = st.secrets
+        
         # Access secrets using dictionary-style (standard Streamlit pattern)
-        if 'KALSHI_API_KEY_ID' in secrets_dict:
-            os.environ['KALSHI_API_KEY_ID'] = str(secrets_dict['KALSHI_API_KEY_ID'])
-        if 'KALSHI_PRIVATE_KEY_PEM' in secrets_dict:
-            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(secrets_dict['KALSHI_PRIVATE_KEY_PEM'])
-        if 'UNABATED_API_KEY' in secrets_dict:
-            os.environ['UNABATED_API_KEY'] = str(secrets_dict['UNABATED_API_KEY'])
+        # Use .get() to safely check for keys and avoid KeyError
+        kalshi_key_id = secrets_dict.get('KALSHI_API_KEY_ID')
+        if kalshi_key_id:
+            os.environ['KALSHI_API_KEY_ID'] = str(kalshi_key_id)
+        
+        kalshi_private_key = secrets_dict.get('KALSHI_PRIVATE_KEY_PEM')
+        if kalshi_private_key:
+            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(kalshi_private_key)
+        
+        unabated_key = secrets_dict.get('UNABATED_API_KEY')
+        if unabated_key:
+            os.environ['UNABATED_API_KEY'] = str(unabated_key)
+            
     except (StreamlitSecretNotFoundError, AttributeError, KeyError, TypeError):
         # Secrets file doesn't exist or can't be read - this is OK for local testing
         # Will fall back to environment variables or local files
