@@ -144,11 +144,11 @@ def format_ev_percent(ev_pct: Optional[float]) -> str:
     return f"{sign}{ev_pct:.1f}%"
 
 
-def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None) -> str:
+def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None, totals_rows: List[Dict[str, Any]] = None) -> str:
     """
     Create HTML dashboard with dark theme matching the reference image.
     
-    Includes both moneylines and spreads tables.
+    Includes moneylines, spreads, and totals tables.
     
     Returns:
         HTML content as string
@@ -763,6 +763,123 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         </table>
 """
     
+    # Add totals table if provided (after spreads, or after moneylines if no spreads)
+    if totals_rows:
+        html_content += """
+        <h2>TOTALS</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Game Date</th>
+                    <th>Game Time</th>
+                    <th>ROTO</th>
+                    <th>Away Team</th>
+                    <th>Home Team</th>
+                    <th>Consensus</th>
+                    <th>Strike</th>
+                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Over Kalshi</th>
+                    <th title="NO break-even price (top NO bid, maker join-queue, inc fees)">Under Kalshi</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+        
+        # Find max liquidity for totals scaling (from both over and under)
+        max_totals_liq = 0
+        for row in totals_rows:
+            over_liq = row.get('over_kalshi_liq')
+            under_liq = row.get('under_kalshi_liq')
+            if over_liq is not None and isinstance(over_liq, (int, float)):
+                max_totals_liq = max(max_totals_liq, over_liq)
+            if under_liq is not None and isinstance(under_liq, (int, float)):
+                max_totals_liq = max(max_totals_liq, under_liq)
+        
+        if max_totals_liq == 0:
+            max_totals_liq = 10000
+        
+        # Sort totals by ROTO
+        totals_rows_sorted = sorted(totals_rows, key=lambda x: (
+            x.get('away_roto') is None,
+            x.get('away_roto') or 0,
+            x.get('game_date') or ''
+        ))
+        
+        for row in totals_rows_sorted:
+            # Format game time and check if started
+            event_start = row.get('event_start')
+            game_time_str = format_game_time_pst(event_start)
+            is_started = is_game_started(event_start)
+            row_class = "game-started" if is_started else ""
+            
+            # Format ROTO
+            away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
+            
+            # Format consensus
+            consensus_str = row.get('consensus', 'N/A')
+            
+            # Format strike
+            strike_str = row.get('strike', 'N/A')
+            
+            # Get Over/Under Kalshi values
+            over_kalshi_val = row.get('over_kalshi_prob')
+            under_kalshi_val = row.get('under_kalshi_prob')
+            over_kalshi_liq = row.get('over_kalshi_liq')
+            under_kalshi_liq = row.get('under_kalshi_liq')
+            
+            over_kalshi_str = f"{over_kalshi_val:.4f}" if over_kalshi_val is not None else "N/A"
+            under_kalshi_str = f"{under_kalshi_val:.4f}" if under_kalshi_val is not None else "N/A"
+            
+            # Format liquidity
+            over_kalshi_liq_str = format_liq_k(over_kalshi_liq)
+            under_kalshi_liq_str = format_liq_k(under_kalshi_liq)
+            
+            # Calculate bar percentages and gradients
+            over_kalshi_liq_pct = calc_liq_bar_pct(over_kalshi_liq, max_totals_liq)
+            under_kalshi_liq_pct = calc_liq_bar_pct(under_kalshi_liq, max_totals_liq)
+            over_kalshi_liq_gradient = calc_liq_gradient(over_kalshi_liq, max_totals_liq)
+            under_kalshi_liq_gradient = calc_liq_gradient(under_kalshi_liq, max_totals_liq)
+            
+            html_content += f"""
+                <tr class="{row_class}">
+                    <td class="date-cell">{row['game_date']}</td>
+                    <td class="date-cell">{game_time_str}</td>
+                    <td class="prob-value">{away_roto_str}</td>
+                    <td class="team-name">{row['away_team']}</td>
+                    <td class="team-name">{row['home_team']}</td>
+                    <td class="team-name">{consensus_str}</td>
+                    <td class="team-name">{strike_str}</td>
+"""
+            
+            # Over Kalshi cell (with liquidity bar if value exists)
+            if over_kalshi_val is not None:
+                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Over Liq: {over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};" data-prob="{over_kalshi_val}" data-original="{over_kalshi_str}">
+                        <div class="kalshi-cell-content">{over_kalshi_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
+"""
+            else:
+                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{over_kalshi_str}">{over_kalshi_str}</td>
+"""
+            
+            # Under Kalshi cell (with liquidity bar if value exists)
+            if under_kalshi_val is not None:
+                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Under Liq: {under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};" data-prob="{under_kalshi_val}" data-original="{under_kalshi_str}">
+                        <div class="kalshi-cell-content">{under_kalshi_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
+"""
+            else:
+                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{under_kalshi_str}">{under_kalshi_str}</td>
+"""
+            
+            html_content += f"""                </tr>
+"""
+        
+        html_content += """
+            </tbody>
+        </table>
+"""
+    
     html_content += """
     </div>
 </body>
@@ -772,11 +889,11 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
     return html_content
 
 
-def open_dashboard_in_browser(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None):
+def open_dashboard_in_browser(table_rows: List[Dict[str, Any]], spread_rows: List[Dict[str, Any]] = None, totals_rows: List[Dict[str, Any]] = None):
     """
     Create HTML dashboard and open it in the default browser.
     """
-    html_content = create_html_dashboard(table_rows, spread_rows)
+    html_content = create_html_dashboard(table_rows, spread_rows, totals_rows)
     
     # Create temporary HTML file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
@@ -1010,8 +1127,17 @@ def main():
         # Silently ignore errors in spreads module (don't break moneylines)
         print(f"\nNote: Spreads table unavailable ({e})\n")
     
-    # Step 6: Open dashboard in browser window (with spreads if available)
-    open_dashboard_in_browser(table_rows, spread_rows if spread_rows else None)
+    # Step 6: Get totals data (additive feature, zero impact on moneylines/spreads)
+    totals_rows = []
+    try:
+        from nba_totals_dashboard import build_totals_rows_for_today, print_totals_table
+        totals_rows = build_totals_rows_for_today()
+    except Exception as e:
+        # Silently ignore errors in totals module (don't break moneylines/spreads)
+        print(f"\nNote: Totals table unavailable ({e})\n")
+    
+    # Step 7: Open dashboard in browser window (with spreads and totals if available)
+    open_dashboard_in_browser(table_rows, spread_rows if spread_rows else None, totals_rows if totals_rows else None)
     
     # Also print console version
     print_dashboard(table_rows)
@@ -1019,6 +1145,10 @@ def main():
     # Print spreads table if available
     if spread_rows:
         print_spreads_table(spread_rows)
+    
+    # Print totals table if available
+    if totals_rows:
+        print_totals_table(totals_rows)
 
 
 if __name__ == "__main__":

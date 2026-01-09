@@ -37,6 +37,42 @@ from utils.kalshi_api import load_creds
 DEBUG_SPREADS = True
 
 
+def parse_spread_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Parse team code and strike bucket from spread market ticker.
+    
+    IMPORTANT: Returns strike_bucket (e.g., 6), NOT exact strike value.
+    Strike value must be parsed from title separately.
+    
+    Example: KXNBASPREAD-26JAN09LACBKN-LAC6 → (LAC, 6)
+    
+    Args:
+        ticker: Market ticker string (e.g., "KXNBASPREAD-26JAN09LACBKN-LAC6")
+    
+    Returns:
+        Tuple of (team_code, strike_bucket) where:
+        - team_code: 3-letter uppercase team code (e.g., "LAC") or None
+        - strike_bucket: Integer strike bucket/index (e.g., 6) or None
+    """
+    if not ticker:
+        return (None, None)
+    
+    parts = ticker.split("-")
+    if len(parts) < 3:
+        return (None, None)
+    
+    suffix = parts[-1]  # e.g., "LAC6"
+    
+    # Extract team code (3 letters) and strike bucket (remaining digits)
+    match = re.match(r'^([A-Z]{3})(\d+)$', suffix)
+    if match:
+        team_code = match.group(1)
+        strike_bucket = int(match.group(2))
+        return (team_code, strike_bucket)
+    
+    return (None, None)
+
+
 def extract_unabated_spreads(event: Dict[str, Any], teams: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
     """
     Extract Unabated spread lines keyed by team_id from ms49.
@@ -145,9 +181,9 @@ def extract_unabated_spreads(event: Dict[str, Any], teams: Dict[str, Any]) -> Di
     return spreads_by_team_id
 
 
-def discover_kalshi_spread_markets(event_ticker: str) -> List[Dict[str, Any]]:
+def discover_kalshi_spread_markets(event_ticker: str, away_team_name: str, home_team_name: str, xref: Dict[Tuple[str, str], str]) -> List[Dict[str, Any]]:
     """
-    Discover Kalshi spread markets for an event ticker.
+    Discover Kalshi spread markets for an event ticker and parse market team codes.
     
     IMPORTANT: Spreads are in KXNBASPREAD series, not KXNBAGAME series.
     This function converts the KXNBAGAME event ticker to KXNBASPREAD event ticker.
@@ -156,12 +192,17 @@ def discover_kalshi_spread_markets(event_ticker: str) -> List[Dict[str, Any]]:
     - title contains "wins by over" and "points"
     - Or market_type indicates spread
     
+    Parses each market title to determine:
+    - market_team_code: 3-letter Kalshi code of the team in the title
+    - strike: float strike value (e.g., 6.5)
+    
     Returns:
         List of market dicts, each with:
         - ticker: market ticker
         - title: market title
         - parsed_strike: float strike value (e.g., 6.5)
-        - anchor_team_token: team name/code from title
+        - market_team_code: 3-letter Kalshi code (e.g., "LAC", "BKN")
+        - anchor_team_token: team name/code from title (for debug)
     """
     try:
         api_key_id, private_key_pem = load_creds()
@@ -190,23 +231,32 @@ def discover_kalshi_spread_markets(event_ticker: str) -> List[Dict[str, Any]]:
     
     spread_markets = []
     
+    # Get team codes for fallback matching
+    away_code = team_to_kalshi_code("NBA", away_team_name, xref)
+    home_code = team_to_kalshi_code("NBA", home_team_name, xref)
+    
+    # Build name variations for fallback matching (only used if ticker parsing fails)
+    away_variations = _build_team_name_variations(away_team_name)
+    home_variations = _build_team_name_variations(home_team_name)
+    
     for market in markets:
         if not isinstance(market, dict):
             continue
         
-        # Get market title
-        title = (
-            market.get("title") or
-            market.get("market_title") or
-            market.get("name") or
-            ""
-        ).lower()
+        # Get market ticker
+        market_ticker = market.get("ticker") or market.get("market_ticker")
+        if not market_ticker:
+            continue
+        
+        # Get market title (preserve original case for parsing)
+        title_raw = market.get("title") or market.get("market_title") or market.get("name") or ""
+        title_lower = title_raw.lower()
         
         # Check if it's a spread market by title patterns
         is_spread = False
         
         # Pattern: "wins by over" or "wins by" + "points"
-        if ("wins by over" in title or "wins by" in title) and "points" in title:
+        if ("wins by over" in title_lower or "wins by" in title_lower) and "points" in title_lower:
             is_spread = True
         
         # Also check market_type if available
@@ -223,116 +273,154 @@ def discover_kalshi_spread_markets(event_ticker: str) -> List[Dict[str, Any]]:
         if not is_spread:
             continue
         
-        # Parse strike from title
-        # Pattern examples:
-        # "Team wins by over 6.5 points"
-        # "Team wins by over 6 points"
-        strike = None
-        anchor_team_token = None
+        # PRIMARY: Parse team code from ticker
+        market_team_code, strike_bucket = parse_spread_market_ticker(market_ticker)
+        ticker_parse_success = market_team_code is not None
         
-        # Extract strike (number before "points")
-        strike_match = re.search(r'over\s+([\d.]+)\s+points?', title, re.IGNORECASE)
+        # Parse strike from title (always, regardless of ticker parsing success)
+        strike = None
+        strike_match = re.search(r'over\s+([\d.]+)\s+points?', title_lower, re.IGNORECASE)
         if strike_match:
             try:
                 strike = float(strike_match.group(1))
             except (ValueError, AttributeError):
                 pass
         
-        # Extract team name/code from title
-        # Usually format: "{Team} wins by over..."
-        team_match = re.match(r'^([a-z\s]+?)\s+wins\s+by', title, re.IGNORECASE)
-        if team_match:
-            anchor_team_token = team_match.group(1).strip()
+        # FALLBACK: If ticker parsing failed, try title-based matching
+        anchor_team_token = None
+        if not ticker_parse_success:
+            # Extract team name/code from title
+            team_match = re.match(r'^([a-z\s]+?)\s+wins\s+by', title_lower, re.IGNORECASE)
+            if team_match:
+                anchor_team_token = team_match.group(1).strip()
+                
+                # Match anchor_team_token to away or home team to get market_team_code
+                matched_away = any(
+                    var in anchor_team_token or anchor_team_token in var
+                    for var in away_variations
+                    if var
+                )
+                matched_home = any(
+                    var in anchor_team_token or anchor_team_token in var
+                    for var in home_variations
+                    if var
+                )
+                
+                if matched_away and away_code:
+                    market_team_code = away_code
+                elif matched_home and home_code:
+                    market_team_code = home_code
+                else:
+                    # Try to match directly to codes
+                    if anchor_team_token and away_code and away_code.lower() in anchor_team_token:
+                        market_team_code = away_code
+                    elif anchor_team_token and home_code and home_code.lower() in anchor_team_token:
+                        market_team_code = home_code
+            
+            # FALLBACK 2: Try regex fallback on ticker suffix
+            if not market_team_code:
+                parts = market_ticker.split("-")
+                if len(parts) >= 3:
+                    suffix = parts[-1]  # e.g., "LAC6"
+                    # Try to match pattern -{TEAM_CODE}\d+ where TEAM_CODE is one of away_code or home_code
+                    for team_code_candidate in [away_code, home_code]:
+                        if team_code_candidate and suffix.startswith(team_code_candidate):
+                            # Verify it's followed by digits
+                            if re.match(rf'^{team_code_candidate}\d+$', suffix):
+                                market_team_code = team_code_candidate
+                                break
+            
+            # Log warning if fallback was used
+            if not ticker_parse_success:
+                if market_team_code:
+                    if DEBUG_SPREADS:
+                        print(f"⚠️ Ticker parsing failed for {market_ticker}, used fallback: {market_team_code}")
+                else:
+                    if DEBUG_SPREADS:
+                        print(f"⚠️ Could not determine market_team_code from ticker or title: {market_ticker} (title: {title_raw[:50]})")
         
+        # Must not skip markets: keep even if team code is None (strike is required though)
         if strike is None:
             if DEBUG_SPREADS:
-                print(f"⚠️ Could not parse strike from title: {title}")
-            continue
+                print(f"⚠️ Could not parse strike from title: {title_raw}")
+            continue  # Strike is required, but team_code can be None
         
+        # Append market (even if market_team_code is None - we'll filter at selection step)
         spread_markets.append({
-            "ticker": market.get("ticker") or market.get("market_ticker"),
-            "title": market.get("title") or market.get("market_title") or title,
+            "ticker": market_ticker,
+            "title": title_raw,
             "parsed_strike": strike,
+            "market_team_code": market_team_code,  # May be None if all parsing fails
             "anchor_team_token": anchor_team_token
         })
     
     return spread_markets
 
 
-def match_spread_markets_to_teams(
-    spread_markets: List[Dict[str, Any]],
-    away_team_name: str,
-    home_team_name: str,
-    xref: Dict[Tuple[str, str], str]
-) -> Dict[str, List[Dict[str, Any]]]:
+def map_team_spread_to_market_and_side(
+    team_spread: float,
+    team_code: str,
+    opponent_code: str,
+    spread_markets: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    Match spread markets to away/home teams by parsing titles.
+    Map Unabated team spread to Kalshi market and side to trade.
     
-    Handles name variations (e.g., LA vs Los Angeles, full names vs codes).
+    Logic:
+    - If team_spread < 0 (team is favorite): use team's market, trade YES
+    - If team_spread > 0 (team is underdog): use opponent's market, trade NO
+      (because "underdog +X covers" = NOT(favorite wins by > X))
+    
+    Args:
+        team_spread: Unabated spread for the team (e.g., -6.5 or +6.5)
+        team_code: 3-letter Kalshi code for the team (e.g., "BKN")
+        opponent_code: 3-letter Kalshi code for opponent (e.g., "LAC")
+        spread_markets: List of all spread markets for the game
     
     Returns:
-        Dict with keys:
-        - "away_markets": List of markets anchored to away team
-        - "home_markets": List of markets anchored to home team
-        - "unmatched_markets": List of markets that couldn't be matched
+        Tuple of (selected_market_dict, side_to_trade)
+        - selected_market_dict: Market dict with matching strike, or None
+        - side_to_trade: "YES" or "NO"
     """
-    result = {
-        "away_markets": [],
-        "home_markets": [],
-        "unmatched_markets": []
-    }
+    abs_spread = abs(team_spread)
     
-    # Build name variations for matching
-    away_variations = _build_team_name_variations(away_team_name)
-    home_variations = _build_team_name_variations(home_team_name)
+    # Determine which market to use and which side
+    if team_spread < 0:
+        # Favorite: use team's market, trade YES
+        target_market_team_code = team_code
+        side_to_trade = "YES"
+    else:
+        # Underdog: use opponent's market, trade NO
+        target_market_team_code = opponent_code
+        side_to_trade = "NO"
     
-    # Also get Kalshi codes
-    away_code = team_to_kalshi_code("NBA", away_team_name, xref)
-    home_code = team_to_kalshi_code("NBA", home_team_name, xref)
+    # Find markets for target_market_team_code
+    candidate_markets = [
+        m for m in spread_markets
+        if m.get("market_team_code") == target_market_team_code
+    ]
     
-    if away_code:
-        away_variations.append(away_code.lower())
-        away_variations.append(away_code)
+    if not candidate_markets:
+        return (None, side_to_trade)
     
-    if home_code:
-        home_variations.append(home_code.lower())
-        home_variations.append(home_code)
-    
-    for market in spread_markets:
-        anchor_token = (market.get("anchor_team_token") or "").lower().strip()
-        
-        if not anchor_token:
-            result["unmatched_markets"].append(market)
+    # Select closest strike to abs_spread
+    markets_with_distance = []
+    for market in candidate_markets:
+        strike = market.get("parsed_strike")
+        if strike is None:
             continue
-        
-        # Try to match to away team
-        matched_away = any(
-            var in anchor_token or anchor_token in var
-            for var in away_variations
-            if var
-        )
-        
-        # Try to match to home team
-        matched_home = any(
-            var in anchor_token or anchor_token in var
-            for var in home_variations
-            if var
-        )
-        
-        if matched_away and not matched_home:
-            result["away_markets"].append(market)
-        elif matched_home and not matched_away:
-            result["home_markets"].append(market)
-        elif matched_away and matched_home:
-            # Ambiguous - prefer longer match
-            if len(max(away_variations, key=len)) >= len(max(home_variations, key=len)):
-                result["away_markets"].append(market)
-            else:
-                result["home_markets"].append(market)
-        else:
-            result["unmatched_markets"].append(market)
+        distance = abs(strike - abs_spread)
+        markets_with_distance.append((distance, strike, market))
     
-    return result
+    if not markets_with_distance:
+        return (None, side_to_trade)
+    
+    # Sort by distance (closest first), then by strike (lower first for tie-break)
+    markets_with_distance.sort(key=lambda x: (x[0], x[1]))
+    
+    # Return the closest market
+    selected_market = markets_with_distance[0][2]
+    return (selected_market, side_to_trade)
 
 
 def _build_team_name_variations(team_name: str) -> List[str]:
@@ -361,89 +449,61 @@ def _build_team_name_variations(team_name: str) -> List[str]:
     return variations
 
 
-def determine_pov_team(
-    away_spread: Optional[float],
-    home_spread: Optional[float],
-    away_markets: List[Dict[str, Any]],
-    home_markets: List[Dict[str, Any]]
-) -> Tuple[Optional[str], Optional[float]]:
-    """
-    Determine the POV team for strike selection.
-    
-    Logic:
-    1. If one side has many more markets, use that
-    2. Otherwise, use the team that matches Unabated favorite (negative spread)
-    
-    Returns:
-        Tuple of (pov_team, pov_spread) where pov_team is "away" or "home"
-    """
-    # Count markets per side
-    away_count = len(away_markets)
-    home_count = len(home_markets)
-    
-    # If one side has significantly more markets, use that
-    if away_count >= 2 * home_count:
-        if DEBUG_SPREADS:
-            print(f"  → POV: away (has {away_count} markets vs {home_count})")
-        return ("away", away_spread)
-    elif home_count >= 2 * away_count:
-        if DEBUG_SPREADS:
-            print(f"  → POV: home (has {home_count} markets vs {away_count})")
-        return ("home", home_spread)
-    
-    # Otherwise, use Unabated favorite (negative spread = favorite)
-    if away_spread is not None and away_spread < 0:
-        if DEBUG_SPREADS:
-            print(f"  → POV: away (Unabated favorite, spread={away_spread})")
-        return ("away", away_spread)
-    elif home_spread is not None and home_spread < 0:
-        if DEBUG_SPREADS:
-            print(f"  → POV: home (Unabated favorite, spread={home_spread})")
-        return ("home", home_spread)
-    
-    # Default to away if we have a spread
-    if away_spread is not None:
-        if DEBUG_SPREADS:
-            print(f"  → POV: away (default, spread={away_spread})")
-        return ("away", away_spread)
-    elif home_spread is not None:
-        if DEBUG_SPREADS:
-            print(f"  → POV: home (default, spread={home_spread})")
-        return ("home", home_spread)
-    
-    return (None, None)
 
 
-def select_closest_strikes(
-    canonical_spread: float,
-    available_markets: List[Dict[str, Any]],
+def select_closest_strikes_for_team_spread(
+    team_spread: float,
+    team_code: str,
+    opponent_code: str,
+    spread_markets: List[Dict[str, Any]],
     count: int = 2
-) -> List[Dict[str, Any]]:
+) -> List[Tuple[Dict[str, Any], str]]:
     """
-    Select the N closest strikes to canonical spread.
+    Select the N closest strikes for a team's spread, returning market + side pairs.
+    
+    For each selected strike, determines which market and side to use:
+    - Favorite (spread < 0): use team's market, trade YES
+    - Underdog (spread > 0): use opponent's market, trade NO
     
     Args:
-        canonical_spread: Unabated canonical spread (e.g., -2.5)
-        available_markets: List of market dicts with "parsed_strike" key
+        team_spread: Unabated spread for the team (e.g., -6.5 or +6.5)
+        team_code: 3-letter Kalshi code for the team
+        opponent_code: 3-letter Kalshi code for opponent
+        spread_markets: List of all spread markets for the game
         count: Number of strikes to select (default 2)
     
     Returns:
-        List of selected market dicts, sorted by distance to canonical
+        List of tuples: (selected_market_dict, side_to_trade)
+        Sorted by distance to abs(team_spread)
     """
-    if not available_markets:
-        return []
+    abs_spread = abs(team_spread)
     
-    # Calculate absolute value of canonical spread for distance calculation
-    S = abs(canonical_spread)
+    # Determine which market team to use
+    if team_spread < 0:
+        # Favorite: use team's market, trade YES
+        target_market_team_code = team_code
+        side_to_trade = "YES"
+    else:
+        # Underdog: use opponent's market, trade NO
+        target_market_team_code = opponent_code
+        side_to_trade = "NO"
+    
+    # Find markets for target_market_team_code
+    candidate_markets = [
+        m for m in spread_markets
+        if m.get("market_team_code") == target_market_team_code
+    ]
+    
+    if not candidate_markets:
+        return []
     
     # Calculate distance for each market
     markets_with_distance = []
-    for market in available_markets:
+    for market in candidate_markets:
         strike = market.get("parsed_strike")
         if strike is None:
             continue
-        
-        distance = abs(strike - S)
+        distance = abs(strike - abs_spread)
         markets_with_distance.append((distance, strike, market))
     
     if not markets_with_distance:
@@ -452,8 +512,8 @@ def select_closest_strikes(
     # Sort by distance (closest first), then by strike (lower first for tie-break)
     markets_with_distance.sort(key=lambda x: (x[0], x[1]))
     
-    # Select top N
-    selected = [market for _, _, market in markets_with_distance[:count]]
+    # Select top N and pair with side_to_trade
+    selected = [(markets_with_distance[i][2], side_to_trade) for i in range(min(count, len(markets_with_distance)))]
     
     return selected
 
@@ -503,92 +563,115 @@ def get_no_bid_top_and_liquidity(orderbook: Dict[str, Any]) -> Tuple[Optional[in
     return (no_bid_top_c, no_bid_top_liq, no_bids_by_price)
 
 
-def get_spread_orderbook_data(market_ticker: str) -> Dict[str, Any]:
+def get_spread_orderbook_data(market_ticker: str, side_to_trade: str = "YES") -> Dict[str, Any]:
     """
-    Fetch orderbook and compute TOB for both YES and NO sides of a spread market.
+    Fetch orderbook and compute TOB for a specific side (YES or NO) of a spread market.
     
-    For spreads, the same market has both YES (POV team covers) and NO (opponent covers) sides.
+    Args:
+        market_ticker: Kalshi market ticker
+        side_to_trade: "YES" or "NO" - which side's bids to extract
     
     Returns:
         Dict with keys:
-        - tob_effective_prob: YES bid break-even probability (after fees) - for POV team
-        - tob_liq: YES bid liquidity - for POV team
-        - no_tob_effective_prob: NO bid break-even probability (after fees) - for opponent team
-        - no_tob_liq: NO bid liquidity - for opponent team
-        - tob_p1_effective_prob: YES bid+1c break-even probability (after fees)
-        - tob_p1_liq: YES bid+1c liquidity (None if crossed or doesn't exist)
+        - tob_bid_cents: Top bid price in cents
+        - tob_effective_prob: Break-even probability at top bid (after fees)
+        - tob_liq: Liquidity at top bid
+        - tob_p1_bid_cents: Top bid+1c price (if valid and doesn't cross)
+        - tob_p1_effective_prob: Break-even probability at top+1c (after fees)
+        - tob_p1_liq: Always None (theoretical price)
         - crossed: Boolean indicating if +1c would cross
+        - error: Error message if any
     """
     try:
         api_key_id, private_key_pem = load_creds()
-    except Exception:
+    except Exception as e:
         return {
+            "tob_bid_cents": None,
             "tob_effective_prob": None,
             "tob_liq": None,
-            "no_tob_effective_prob": None,
-            "no_tob_liq": None,
+            "tob_p1_bid_cents": None,
             "tob_p1_effective_prob": None,
             "tob_p1_liq": None,
-            "crossed": None
+            "crossed": None,
+            "error": f"Failed to load credentials: {e}"
         }
     
     orderbook = fetch_orderbook(api_key_id, private_key_pem, market_ticker)
     
     if not orderbook:
         return {
+            "tob_bid_cents": None,
             "tob_effective_prob": None,
             "tob_liq": None,
-            "no_tob_effective_prob": None,
-            "no_tob_liq": None,
+            "tob_p1_bid_cents": None,
             "tob_p1_effective_prob": None,
             "tob_p1_liq": None,
-            "crossed": None
+            "crossed": None,
+            "error": "No orderbook"
         }
     
-    # Get YES bid top and liquidity (for POV team)
-    yes_bid_top_c, yes_bid_top_liq, yes_bids_by_price = get_yes_bid_top_and_liquidity(orderbook)
+    # Extract top bid based on side
+    if side_to_trade.upper() == "YES":
+        bid_top_c, bid_top_liq, bids_by_price = get_yes_bid_top_and_liquidity(orderbook)
+        # Get opposing side for crossing check
+        no_bid_top_c, _, _ = get_no_bid_top_and_liquidity(orderbook)
+        ask_top_c = (100 - no_bid_top_c) if no_bid_top_c is not None else None
+    elif side_to_trade.upper() == "NO":
+        bid_top_c, bid_top_liq, bids_by_price = get_no_bid_top_and_liquidity(orderbook)
+        # Get opposing side for crossing check
+        yes_bid_top_c, _, _ = get_yes_bid_top_and_liquidity(orderbook)
+        ask_top_c = (100 - yes_bid_top_c) if yes_bid_top_c is not None else None
+    else:
+        return {
+            "tob_bid_cents": None,
+            "tob_effective_prob": None,
+            "tob_liq": None,
+            "tob_p1_bid_cents": None,
+            "tob_p1_effective_prob": None,
+            "tob_p1_liq": None,
+            "crossed": None,
+            "error": f"Invalid side_to_trade: {side_to_trade} (must be YES or NO)"
+        }
     
-    # Calculate break-even probability at YES TOB (after maker fees)
-    tob_effective_prob = yes_break_even_prob(yes_bid_top_c) if yes_bid_top_c is not None else None
+    if bid_top_c is None:
+        return {
+            "tob_bid_cents": None,
+            "tob_effective_prob": None,
+            "tob_liq": None,
+            "tob_p1_bid_cents": None,
+            "tob_p1_effective_prob": None,
+            "tob_p1_liq": None,
+            "crossed": None,
+            "error": f"No {side_to_trade} bids found"
+        }
     
-    # Get NO bid top and liquidity (for opponent team)
-    no_bid_top_c, no_bid_top_liq, no_bids_by_price = get_no_bid_top_and_liquidity(orderbook)
+    # Calculate break-even probability at TOB (after maker fees)
+    tob_effective_prob = yes_break_even_prob(bid_top_c)
     
-    # Calculate break-even probability at NO TOB (after maker fees)
-    # NO bid represents betting against the POV team, so we use the NO bid price directly
-    no_tob_effective_prob = yes_break_even_prob(no_bid_top_c) if no_bid_top_c is not None else None
-    
-    # Get YES ask top (from NO bids) for crossing check
-    yes_ask_top_c = None
-    if no_bid_top_c is not None:
-        yes_ask_top_c = 100 - no_bid_top_c
-    
-    # Calculate TOB+1c for YES side
-    yes_bid_top_p1_c = yes_bid_top_c + 1 if yes_bid_top_c is not None and yes_bid_top_c < 99 else None
+    # Calculate TOB+1c
+    bid_top_p1_c = bid_top_c + 1 if bid_top_c < 99 else None
     crossed = False
     
-    if yes_bid_top_p1_c is not None and yes_ask_top_c is not None:
-        if yes_bid_top_p1_c >= yes_ask_top_c:
+    # Check if +1c would cross the book
+    if bid_top_p1_c is not None and ask_top_c is not None:
+        if bid_top_p1_c >= ask_top_c:
             crossed = True
-            yes_bid_top_p1_c = None
+            bid_top_p1_c = None
     
-    # Calculate break-even probability at YES TOB+1c if valid
+    # Calculate break-even probability at TOB+1c if valid
     tob_p1_effective_prob = None
-    tob_p1_liq = None
-    
-    if yes_bid_top_p1_c is not None:
-        tob_p1_effective_prob = yes_break_even_prob(yes_bid_top_p1_c)
-        # Note: +1c is theoretical, so liquidity is None (or 0)
-        tob_p1_liq = None
+    if bid_top_p1_c is not None:
+        tob_p1_effective_prob = yes_break_even_prob(bid_top_p1_c)
     
     return {
-        "tob_effective_prob": tob_effective_prob,  # YES bid (POV team)
-        "tob_liq": yes_bid_top_liq,
-        "no_tob_effective_prob": no_tob_effective_prob,  # NO bid (opponent team)
-        "no_tob_liq": no_bid_top_liq,
+        "tob_bid_cents": bid_top_c,
+        "tob_effective_prob": tob_effective_prob,
+        "tob_liq": bid_top_liq,
+        "tob_p1_bid_cents": bid_top_p1_c,
         "tob_p1_effective_prob": tob_p1_effective_prob,
-        "tob_p1_liq": tob_p1_liq,
-        "crossed": crossed
+        "tob_p1_liq": None,  # Theoretical price, no direct liquidity
+        "crossed": crossed,
+        "error": None
     }
 
 
@@ -763,131 +846,222 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
             print(f"  Away spread (Unabated): {away_spread} (juice: {away_juice})")
             print(f"  Home spread (Unabated): {home_spread} (juice: {home_juice})")
         
-        # Discover Kalshi spread markets
+        # Discover Kalshi spread markets (with team name parsing)
         if not event_ticker:
             if DEBUG_SPREADS:
                 print(f"  ⚠️ No event ticker, skipping")
             continue
         
-        spread_markets = discover_kalshi_spread_markets(event_ticker)
+        spread_markets = discover_kalshi_spread_markets(event_ticker, away_team_name, home_team_name, xref)
         
         if DEBUG_SPREADS:
             print(f"  Found {len(spread_markets)} spread market(s)")
+            # Show first few markets for debug
+            for m in spread_markets[:3]:
+                print(f"    - {m.get('title')} -> market_team={m.get('market_team_code')}, strike={m.get('parsed_strike')}")
         
         if not spread_markets:
             continue
         
-        # Match markets to teams
-        matched = match_spread_markets_to_teams(
-            spread_markets,
-            away_team_name,
-            home_team_name,
-            xref
+        # Get team codes
+        away_code = team_to_kalshi_code("NBA", away_team_name, xref)
+        home_code = team_to_kalshi_code("NBA", home_team_name, xref)
+        
+        if not away_code or not home_code:
+            if DEBUG_SPREADS:
+                print(f"  ⚠️ Could not get team codes (away={away_code}, home={home_code})")
+            continue
+        
+        # Check if this is LAC @ BKN for targeted debug
+        is_lacbkn = (away_code == "LAC" and home_code == "BKN") or (away_code == "BKN" and home_code == "LAC")
+        
+        # CANONICAL POV SELECTION: Choose one team's perspective per game
+        # Logic: ALWAYS use favorite's spread (negative spread) as canonical POV
+        # Underdog exposure is represented via NO side of favorite's market
+        # 
+        # IMPORTANT: If one team is underdog (positive spread), the other MUST be favorite (negative spread)
+        # If we can't find a favorite from Unabated data, infer it from the underdog
+        canonical_team = None
+        canonical_code = None
+        canonical_spread = None
+        canonical_juice = None
+        
+        # Priority 1: Use favorite (negative spread) if explicitly available
+        if away_spread is not None and away_spread < 0:
+            # Away team is favorite
+            canonical_team = "away"
+            canonical_code = away_code
+            canonical_spread = away_spread
+            canonical_juice = away_juice
+        elif home_spread is not None and home_spread < 0:
+            # Home team is favorite
+            canonical_team = "home"
+            canonical_code = home_code
+            canonical_spread = home_spread
+            canonical_juice = home_juice
+        # Priority 2: If one team is underdog (positive), the other is implicitly the favorite
+        elif away_spread is not None and away_spread > 0 and home_spread is not None:
+            # Away is underdog, so home must be favorite (even if home_spread is None or positive)
+            # Use home as canonical, but we'll need to infer home spread from away spread
+            canonical_team = "home"
+            canonical_code = home_code
+            # Infer home spread: if away is +X, home is approximately -X
+            canonical_spread = -away_spread if home_spread is None else home_spread
+            canonical_juice = home_juice
+        elif home_spread is not None and home_spread > 0 and away_spread is not None:
+            # Home is underdog, so away must be favorite (even if away_spread is None or positive)
+            # Use away as canonical, but we'll need to infer away spread from home spread
+            canonical_team = "away"
+            canonical_code = away_code
+            # Infer away spread: if home is +X, away is approximately -X
+            canonical_spread = -home_spread if away_spread is None else away_spread
+            canonical_juice = away_juice
+        # Priority 3: Fallback to whichever spread is available
+        elif away_spread is not None:
+            canonical_team = "away"
+            canonical_code = away_code
+            canonical_spread = away_spread
+            canonical_juice = away_juice
+        elif home_spread is not None:
+            canonical_team = "home"
+            canonical_code = home_code
+            canonical_spread = home_spread
+            canonical_juice = home_juice
+        else:
+            # No consensus spread available
+            if DEBUG_SPREADS:
+                print(f"  ⚠️ Missing consensus spread - skipping game")
+            continue
+        
+        # Get opponent info for canonical POV
+        opponent_code = home_code if canonical_team == "away" else away_code
+        
+        # Enhanced debug logging
+        if is_lacbkn or DEBUG_SPREADS:
+            canonical_market_count = len([m for m in spread_markets if m.get("market_team_code") == canonical_code])
+            opponent_market_count = len([m for m in spread_markets if m.get("market_team_code") == opponent_code])
+            print(f"\n  [DEBUG] Canonical POV Selection:")
+            print(f"    Away spread: {away_spread} (juice: {away_juice})")
+            print(f"    Home spread: {home_spread} (juice: {home_juice})")
+            print(f"    Canonical POV: {canonical_team} ({canonical_code}) spread={canonical_spread}")
+            print(f"    Opponent: {opponent_code}")
+            print(f"    Spread markets found: {len(spread_markets)}")
+            print(f"    Markets with market_team_code=={canonical_code}: {canonical_market_count}")
+            print(f"    Markets with market_team_code=={opponent_code}: {opponent_market_count}")
+            if canonical_market_count == 0 and opponent_market_count == 0:
+                print(f"    ⚠️ ZERO markets for both teams - this is why game disappears")
+            # Show first few markets with parsing details
+            for m in spread_markets[:5]:
+                ticker = m.get("ticker", "N/A")
+                team_code = m.get("market_team_code", "N/A")
+                strike = m.get("parsed_strike", "N/A")
+                title = m.get("title", "N/A")
+                print(f"      - {ticker}")
+                print(f"        team_code={team_code}, strike={strike}, title={title[:50]}")
+        
+        # Select 2 closest strikes for canonical POV only
+        # Note: If canonical_spread > 0 (underdog), select_closest_strikes_for_team_spread will
+        # look for opponent's markets (favorite's markets) since underdog uses opponent's market
+        selected_strikes = select_closest_strikes_for_team_spread(
+            canonical_spread, canonical_code, opponent_code, spread_markets, count=2
         )
         
-        away_markets = matched["away_markets"]
-        home_markets = matched["home_markets"]
-        unmatched = matched["unmatched_markets"]
-        
         if DEBUG_SPREADS:
-            print(f"  Away markets: {len(away_markets)}")
-            print(f"  Home markets: {len(home_markets)}")
-            if unmatched:
-                print(f"  Unmatched markets: {len(unmatched)}")
+            print(f"  Selected {len(selected_strikes)} strike(s) for canonical POV ({canonical_code})")
+            if len(selected_strikes) == 0:
+                print(f"  ⚠️ Selection returned 0 strikes - game will be skipped")
+                # Additional debug: show what markets were available
+                if canonical_spread < 0:
+                    # Favorite: should have canonical_code markets
+                    available = [m for m in spread_markets if m.get("market_team_code") == canonical_code]
+                    print(f"    Expected markets for {canonical_code} (favorite): {len(available)}")
+                else:
+                    # Underdog: should have opponent_code markets
+                    available = [m for m in spread_markets if m.get("market_team_code") == opponent_code]
+                    print(f"    Expected markets for {opponent_code} (favorite, for underdog {canonical_code}): {len(available)}")
+            for market, side in selected_strikes:
+                print(f"    - {market.get('ticker')} (strike={market.get('parsed_strike')}, side={side})")
         
-        # Determine POV team
-        pov_team, pov_spread = determine_pov_team(
-            away_spread,
-            home_spread,
-            away_markets,
-            home_markets
-        )
-        
-        if not pov_team or pov_spread is None:
-            if DEBUG_SPREADS:
-                print(f"  ⚠️ Could not determine POV team, skipping")
+        if not selected_strikes:
             continue
         
-        # Get POV team code and consensus spread data
-        pov_team_name = away_team_name if pov_team == "away" else home_team_name
-        pov_team_code = team_to_kalshi_code("NBA", pov_team_name, xref)
-        
-        if not pov_team_code:
-            if DEBUG_SPREADS:
-                print(f"  ⚠️ Could not get Kalshi code for POV team {pov_team_name}")
-            continue
-        
-        # Get consensus spread data for POV team
-        pov_spread_data = away_spread_data if pov_team == "away" else home_spread_data
-        pov_juice = away_juice if pov_team == "away" else home_juice
-        
-        # Select markets for POV team
-        pov_markets = away_markets if pov_team == "away" else home_markets
-        
-        if not pov_markets:
-            if DEBUG_SPREADS:
-                print(f"  ⚠️ No markets for POV team ({pov_team}), skipping")
-            continue
-        
-        # Select 2 closest strikes
-        selected_markets = select_closest_strikes(pov_spread, pov_markets, count=2)
-        
-        if DEBUG_SPREADS:
-            S = abs(pov_spread)
-            print(f"  Canonical spread: {pov_spread} (abs={S})")
-            print(f"  Selected {len(selected_markets)} strike(s):")
-            for market in selected_markets:
-                print(f"    - Strike {market['parsed_strike']}: {market['ticker']}")
-        
-        if not selected_markets:
-            continue
-        
-        # Get opponent team info for finding opposite markets
-        opponent_team_name = home_team_name if pov_team == "away" else away_team_name
-        opponent_team_code = team_to_kalshi_code("NBA", opponent_team_name, xref)
-        opponent_markets = home_markets if pov_team == "away" else away_markets
-        
-        # Build rows for each selected strike
-        for market in selected_markets:
+        # Build rows for canonical POV only (not for both away and home)
+        for market, side_to_trade_canonical in selected_strikes:
+            strike_value = market.get("parsed_strike")
+            if strike_value is None:
+                continue
+            
             market_ticker = market.get("ticker")
             if not market_ticker:
                 continue
             
-            strike = market.get("parsed_strike")
-            if strike is None:
-                continue
+            # Determine market and side for canonical POV team
+            # Logic: if canonical_spread < 0 (favorite), use canonical team's market, trade YES
+            #        if canonical_spread > 0 (underdog), use opponent's market (favorite), trade NO
+            if canonical_spread < 0:
+                # Canonical team is favorite: use canonical team's market, trade YES
+                # Verify market is for canonical team
+                if market.get("market_team_code") != canonical_code:
+                    # Find correct market for canonical team at this strike
+                    correct_markets = [m for m in spread_markets if m.get("market_team_code") == canonical_code and abs(m.get("parsed_strike", 0) - strike_value) < 0.1]
+                    if correct_markets:
+                        market = correct_markets[0]
+                        market_ticker = market.get("ticker")
+                side_canonical = "YES"
+                side_opponent = "NO"  # Opposite side of same market
+            else:
+                # Canonical team is underdog: use opponent's market (favorite), trade NO
+                # Verify market is for opponent team
+                if market.get("market_team_code") != opponent_code:
+                    # Find correct market for opponent team at this strike
+                    correct_markets = [m for m in spread_markets if m.get("market_team_code") == opponent_code and abs(m.get("parsed_strike", 0) - strike_value) < 0.1]
+                    if correct_markets:
+                        market = correct_markets[0]
+                        market_ticker = market.get("ticker")
+                side_canonical = "NO"
+                side_opponent = "YES"  # Opposite side of same market
             
-            # Get orderbook data for POV team's market (contains both YES and NO sides)
-            orderbook_data = get_spread_orderbook_data(market_ticker)
+            # Get orderbook data for both sides (same market)
+            canonical_orderbook_data = get_spread_orderbook_data(market_ticker, side_canonical)
+            opponent_orderbook_data = get_spread_orderbook_data(market_ticker, side_opponent)
             
-            if DEBUG_SPREADS and market == selected_markets[0]:
-                # Debug print for first strike
-                print(f"  Orderbook for market ({market_ticker}):")
-                print(f"    YES TOB (POV team): {orderbook_data['tob_effective_prob']} (liq: {orderbook_data['tob_liq']})")
-                print(f"    NO TOB (opponent): {orderbook_data['no_tob_effective_prob']} (liq: {orderbook_data['no_tob_liq']})")
+            # Assign to away/home based on canonical_team
+            if canonical_team == "away":
+                away_kalshi_prob = canonical_orderbook_data.get("tob_effective_prob")
+                away_kalshi_liq = canonical_orderbook_data.get("tob_liq")
+                home_kalshi_prob = opponent_orderbook_data.get("tob_effective_prob")
+                home_kalshi_liq = opponent_orderbook_data.get("tob_liq")
+            else:
+                away_kalshi_prob = opponent_orderbook_data.get("tob_effective_prob")
+                away_kalshi_liq = opponent_orderbook_data.get("tob_liq")
+                home_kalshi_prob = canonical_orderbook_data.get("tob_effective_prob")
+                home_kalshi_liq = canonical_orderbook_data.get("tob_liq")
             
-            # Format strike string
-            strike_str = format_strike_string(pov_team_code, pov_spread, strike)
+            # Format strike string (canonical team's perspective)
+            if canonical_spread < 0:
+                strike_str = f"{canonical_code} -{strike_value}"
+            else:
+                strike_str = f"{canonical_code} +{strike_value}"
             
-            # Format consensus string
-            consensus_str = format_consensus_string(pov_team_code, pov_spread, pov_juice) if pov_team_code else "N/A"
+            # Format consensus string (use canonical team's spread/juice)
+            consensus_str = format_consensus_string(canonical_code, canonical_spread, canonical_juice)
             
-            # Determine Away/Home Kalshi values based on pov_team
-            # YES side = POV team, NO side = opponent team
-            if pov_team == "away":
-                # YES bid = away team (POV), NO bid = home team (opponent)
-                away_kalshi_prob = orderbook_data["tob_effective_prob"]  # YES bid
-                away_kalshi_liq = orderbook_data["tob_liq"]
-                home_kalshi_prob = orderbook_data["no_tob_effective_prob"]  # NO bid
-                home_kalshi_liq = orderbook_data["no_tob_liq"]
-            else:  # pov_team == "home"
-                # YES bid = home team (POV), NO bid = away team (opponent)
-                away_kalshi_prob = orderbook_data["no_tob_effective_prob"]  # NO bid
-                away_kalshi_liq = orderbook_data["no_tob_liq"]
-                home_kalshi_prob = orderbook_data["tob_effective_prob"]  # YES bid
-                home_kalshi_liq = orderbook_data["tob_liq"]
+            # Targeted debug for LACBKN
+            if is_lacbkn and DEBUG_SPREADS:
+                print(f"\n  [LACBKN DEBUG] Canonical POV spread row: {strike_str}")
+                print(f"    desired strike label: {strike_str}")
+                print(f"    chosen market_ticker: {market_ticker}")
+                print(f"    market title: {market.get('title')}")
+                print(f"    parsed market_team_code: {market.get('market_team_code')}")
+                print(f"    side_canonical ({canonical_code}): {side_canonical}")
+                print(f"    side_opponent ({opponent_code}): {side_opponent}")
+                print(f"    canonical best bid (cents): {canonical_orderbook_data.get('tob_bid_cents')}")
+                print(f"    canonical best bid liq: {canonical_orderbook_data.get('tob_liq')}")
+                print(f"    canonical effective prob: {canonical_orderbook_data.get('tob_effective_prob')}")
+                print(f"    opponent best bid (cents): {opponent_orderbook_data.get('tob_bid_cents')}")
+                print(f"    opponent best bid liq: {opponent_orderbook_data.get('tob_liq')}")
+                print(f"    opponent effective prob: {opponent_orderbook_data.get('tob_effective_prob')}")
             
-            # Build row (duplicate all game metadata)
             spread_rows.append({
                 "game_date": game.get("game_date"),
                 "event_start": game.get("event_start"),
@@ -896,21 +1070,13 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
                 "home_team": home_team_name,
                 "consensus": consensus_str,
                 "strike": strike_str,
-                "pov_team": pov_team,
                 "kalshi_ticker": market_ticker,
                 "kalshi_title": market.get("title"),
-                "unabated_spread": pov_spread,
-                # Store both away and home orderbook data
+                "unabated_spread": canonical_spread,
                 "away_kalshi_prob": away_kalshi_prob,
                 "away_kalshi_liq": away_kalshi_liq,
                 "home_kalshi_prob": home_kalshi_prob,
                 "home_kalshi_liq": home_kalshi_liq,
-                # Keep original fields for backward compatibility
-                "tob_effective_prob": orderbook_data["tob_effective_prob"],
-                "tob_liq": orderbook_data["tob_liq"],
-                "tob_p1_effective_prob": orderbook_data["tob_p1_effective_prob"],
-                "tob_p1_liq": orderbook_data["tob_p1_liq"],
-                "crossed": orderbook_data["crossed"]
             })
     
     return spread_rows
