@@ -14,9 +14,23 @@ from utils import config
 
 def load_creds():
     """
-    Load Kalshi API credentials from files.
+    Load Kalshi API credentials from environment variables (Streamlit) or files (local).
     Returns (api_key_id, private_key_pem).
+    
+    Priority:
+    1. Environment variables (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PEM) - for Streamlit Cloud
+    2. Local files (kalshi_api_key_id.txt, kalshi_private_key.pem) - for local development
     """
+    import os
+    
+    # Try environment variables first (Streamlit Cloud)
+    api_key_id = os.getenv("KALSHI_API_KEY_ID")
+    private_key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
+    
+    if api_key_id and private_key_pem:
+        return api_key_id.strip(), private_key_pem
+    
+    # Fall back to local files (local development)
     try:
         with open(config.API_KEY_ID_FILE, "r") as f:
             api_key_id = f.read().strip()
@@ -26,7 +40,11 @@ def load_creds():
         
         return api_key_id, private_key_pem
     except FileNotFoundError as e:
-        raise FileNotFoundError(f"Missing Kalshi credentials file: {e.filename}")
+        raise FileNotFoundError(
+            f"Missing Kalshi credentials. "
+            f"Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PEM environment variables, "
+            f"or provide files: {e.filename}"
+        )
 
 
 def sign_request(private_key_pem: str, message: str) -> str:

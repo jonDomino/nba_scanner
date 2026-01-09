@@ -29,7 +29,17 @@ API_KEY_ID_FILE = "kalshi_api_key_id.txt"
 PRIVATE_KEY_FILE = "kalshi_private_key.pem"   
 
 # Unabated API (environment variable or local secrets file)
-UNABATED_API_KEY = os.getenv("UNABATED_API_KEY") or (_UNA_KEY if _USE_LOCAL_SECRETS else "") 
+UNABATED_API_KEY = os.getenv("UNABATED_API_KEY") or (_UNA_KEY if _USE_LOCAL_SECRETS else "")
+
+# Validate critical credentials (fail loudly if missing in Streamlit context)
+if not UNABATED_API_KEY:
+    import sys
+    if "streamlit" in sys.modules:
+        # In Streamlit, fail loudly with clear message
+        raise ValueError(
+            "UNABATED_API_KEY environment variable is required for Streamlit deployment. "
+            "Please set it in Streamlit Cloud secrets."
+        ) 
 
 # Trading constants
 MAX_BUDGET_DOLLARS = 50.0

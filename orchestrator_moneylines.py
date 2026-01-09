@@ -1,20 +1,32 @@
 """
 Moneylines-only orchestrator: coordinates data fetching and table building for moneylines only.
 This is a simplified entry point that only builds and outputs the moneylines table.
+
+Supports both local CLI usage and Streamlit Cloud deployment.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 # Import data fetching modules
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
 from data_build.top_of_book import get_top_of_book_post_probs
 
 # Import dashboard renderer (moneylines only)
-from dashboard_html import open_dashboard_in_browser
+from dashboard_html import open_dashboard_in_browser, render_dashboard_html
 
 
 def derive_event_ticker(market_ticker: str) -> Optional[str]:
-    """Derive event ticker from market ticker by removing final -TEAM suffix."""
+    """
+    Derive event ticker from market ticker by removing final -TEAM suffix.
+    
+    Example: KXNBAGAME-26JAN09TORBOS-TOR -> KXNBAGAME-26JAN09TORBOS
+    
+    Args:
+        market_ticker: Market ticker string (e.g., "KXNBAGAME-26JAN09TORBOS-TOR")
+    
+    Returns:
+        Event ticker string or None if parsing fails
+    """
     if not market_ticker:
         return None
     parts = market_ticker.split("-")
@@ -23,14 +35,32 @@ def derive_event_ticker(market_ticker: str) -> Optional[str]:
     return None
 
 
-def main():
-    """Main entry point - orchestrates data fetching and table building for moneylines only."""
+def build_moneylines_rows(debug: bool = False) -> List[Dict[str, Any]]:
+    """
+    Build moneylines table rows from fetched data.
+    
+    Pure function - no side effects, returns data only.
+    Suitable for use in Streamlit or other frameworks.
+    
+    Args:
+        debug: If True, print debug information
+    
+    Returns:
+        List of moneyline row dicts, sorted by away_roto ascending
+    """
+    if debug:
+        print("📊 Fetching today's games with Unabated fairs and Kalshi tickers...")
+    
     # Step 1: Get today's games with fairs and Kalshi tickers
     games = get_today_games_with_fairs_and_kalshi_tickers()
     
     if not games:
-        print("No NBA games found for today")
-        return
+        if debug:
+            print("No NBA games found for today")
+        return []
+    
+    if debug:
+        print(f"Found {len(games)} game(s)")
     
     # Step 2: Get top-of-book maker break-even probs for each event
     event_probs = {}  # event_ticker -> prob dict
@@ -55,6 +85,9 @@ def main():
             game_to_event[i] = event_ticker
     
     # Fetch orderbook data for each event
+    if debug:
+        print(f"Fetching orderbook data for {len(event_tickers)} event(s)...")
+    
     for event_ticker in event_tickers:
         prob_result = get_top_of_book_post_probs(event_ticker)
         event_probs[event_ticker] = prob_result
@@ -115,7 +148,50 @@ def main():
     # Sort by ROTO ascending
     moneyline_rows.sort(key=lambda x: (x.get('away_roto') is None, x.get('away_roto') or 0))
     
-    # Step 4: Render and open dashboard (moneylines only - no spreads or totals)
+    return moneyline_rows
+
+
+def build_dashboard_html_moneylines(rows: List[Dict[str, Any]]) -> str:
+    """
+    Build HTML dashboard string from moneyline rows.
+    
+    Pure function - no side effects, returns HTML string only.
+    
+    Args:
+        rows: List of moneyline row dicts
+    
+    Returns:
+        HTML content as string
+    """
+    return render_dashboard_html(rows, None, None)
+
+
+def run_moneylines_pipeline(debug: bool = False) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Run complete moneylines pipeline: fetch data, build rows, generate HTML.
+    
+    Returns both rows and HTML string for maximum flexibility.
+    
+    Args:
+        debug: If True, print debug information
+    
+    Returns:
+        Tuple of (moneyline_rows, html_string)
+    """
+    rows = build_moneylines_rows(debug=debug)
+    html = build_dashboard_html_moneylines(rows)
+    return rows, html
+
+
+def main():
+    """Main entry point for local CLI usage - orchestrates data fetching and opens dashboard in browser."""
+    moneyline_rows = build_moneylines_rows(debug=True)
+    
+    if not moneyline_rows:
+        print("No NBA games found for today")
+        return
+    
+    # Open dashboard in browser (local usage only)
     open_dashboard_in_browser(moneyline_rows, None, None)
     
     # Also print console version
