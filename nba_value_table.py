@@ -1,12 +1,18 @@
 """
-End-to-end NBA value scanner: today's games with Unabated fairs vs Kalshi maker-post effective sale prices.
+End-to-end NBA value scanner: today's games with Unabated fairs vs Kalshi YES exposure break-even costs.
 
-EV Calculation (Seller/Post-Maker Perspective):
-- Kalshi top/top-1 values represent effective sale probabilities after maker fees (what you can post/sell at)
+Internal: Reads YES bids from orderbook["yes"] for maker prices (join bid queue).
+Also reads NO bids to derive YES ask for crossing check.
+User-facing: YES exposure (team winning) - what price to pay for win exposure.
+
+EV Calculation (Buyer/YES Exposure Perspective):
+- Kalshi top/top+1 values represent break-even win probabilities after maker fees (cost to get YES exposure)
 - Unabated fair represents the true win probability (what the team is actually worth)
-- EV% = (Kalshi_effective_prob - Unabated_fair) × 100
-- Positive EV means selling something worth less for more (profitable to post)
-- Negative EV means selling something worth more for less (unprofitable to post)
+- EV% = (Unabated_fair - Kalshi_break_even) × 100
+- Positive EV means fair win prob > break-even cost (profitable to buy YES)
+- Negative EV means fair win prob < break-even cost (unprofitable to buy YES)
+
+Queue-jump: YES bid top+1¢ only if it doesn't cross the book (yes_bid_top_p1 < yes_ask_top).
 """
 
 import webbrowser
@@ -43,29 +49,29 @@ def derive_event_ticker(market_ticker: str) -> Optional[str]:
     return "-".join(parts[:-1])
 
 
-def compute_ev_percent(fair_prob: Optional[float], kalshi_effective_prob: Optional[float]) -> Optional[float]:
+def compute_ev_percent(p_yes_fair: Optional[float], p_yes_be: Optional[float]) -> Optional[float]:
     """
-    Compute seller/post-maker EV percentage: (kalshi_effective_prob - fair_prob) * 100
+    Compute buyer/YES exposure EV percentage: (p_yes_fair - p_yes_be) * 100
     
-    This calculates EV from the perspective of posting/selling at the Kalshi price.
-    Positive EV means you're selling something worth less (fair_prob) for more (kalshi_effective_prob).
+    This calculates EV from the perspective of buying YES (win exposure) at the Kalshi break-even price.
+    Positive EV means the fair win probability is higher than the break-even cost, so buying is profitable.
     
     Example:
-        Unabated fair = 0.230 (team's true win probability)
-        Kalshi effective price = 0.2626 (what you can sell/post at after fees)
-        EV = (0.2626 - 0.230) * 100 = +3.3% (selling for more than it's worth = +EV)
+        Unabated fair = 0.300 (team's true win probability)
+        Kalshi break-even = 0.275 (fee-adjusted cost to get win exposure)
+        EV = (0.300 - 0.275) * 100 = +2.5% (paying less than it's worth = +EV)
     
     Args:
-        fair_prob: Unabated's fair win probability (0-1)
-        kalshi_effective_prob: Kalshi effective sale probability after maker fees (0-1)
+        p_yes_fair: Unabated's fair win probability (0-1)
+        p_yes_be: Kalshi break-even win probability after maker fees (0-1)
     
     Returns:
-        EV in percent (positive = +EV, negative = -EV) or None if either input is None
+        EV in percent (positive = +EV to buy YES, negative = -EV) or None if either input is None
     """
-    if fair_prob is None or kalshi_effective_prob is None:
+    if p_yes_fair is None or p_yes_be is None:
         return None
     
-    return (kalshi_effective_prob - fair_prob) * 100.0
+    return (p_yes_fair - p_yes_be) * 100.0
 
 
 def utc_to_pst_datetime(utc_timestamp: str) -> datetime:
@@ -500,14 +506,10 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
                     <th>Home Team</th>
                     <th title="Unabated consensus odds">Away Fair</th>
                     <th title="Unabated consensus odds">Home Fair</th>
-                    <th title="Top of NO order book (inc fees)">Away Kalshi</th>
-                    <th title="Jump queue. 1cent above Top of NO order book (inc fees)">Away Kalshi-1c</th>
-                    <th title="Top of NO order book (inc fees)">Home Kalshi</th>
-                    <th title="Jump queue. 1cent above Top of NO order book (inc fees)">Home Kalshi-1c</th>
+                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Away Kalshi</th>
+                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Home Kalshi</th>
                     <th>Away EV</th>
-                    <th>Away EV-1c</th>
                     <th>Home EV</th>
-                    <th>Home EV-1c</th>
                 </tr>
             </thead>
             <tbody>
@@ -549,10 +551,10 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
             # Yellow to green (66-100%)
             return "linear-gradient(to right, #fbbf24 0%, #4ade80 100%)"
     
-    # Find max liquidity for scaling bars
+    # Find max liquidity for scaling bars (only from top columns, not +1c columns)
     max_liq = 0
     for row in table_rows:
-        for liq_key in ['away_top_liq', 'away_topm1_liq', 'home_top_liq', 'home_topm1_liq']:
+        for liq_key in ['away_top_liq', 'home_top_liq']:
             liq = row.get(liq_key)
             if liq is not None and isinstance(liq, (int, float)):
                 max_liq = max(max_liq, liq)
@@ -566,52 +568,34 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
         away_fair_val = row['away_fair']
         home_fair_val = row['home_fair']
         away_top_val = row['away_top_prob']
-        away_topm1_val = row['away_topm1_prob']
         home_top_val = row['home_top_prob']
-        home_topm1_val = row['home_topm1_prob']
         
         # Format values as probabilities (default view)
         away_fair_str = f"{away_fair_val:.3f}" if away_fair_val is not None else "N/A"
         home_fair_str = f"{home_fair_val:.3f}" if home_fair_val is not None else "N/A"
         
         away_top_str = f"{away_top_val:.4f}" if away_top_val is not None else "N/A"
-        away_topm1_str = f"{away_topm1_val:.4f}" if away_topm1_val is not None else "N/A"
         home_top_str = f"{home_top_val:.4f}" if home_top_val is not None else "N/A"
-        home_topm1_str = f"{home_topm1_val:.4f}" if home_topm1_val is not None else "N/A"
         
-        # Format liquidity for tooltips
+        # Format liquidity for tooltips (only for top columns, not +1c)
         away_top_liq_str = format_liq_k(row.get('away_top_liq'))
-        away_topm1_liq_str = format_liq_k(row.get('away_topm1_liq'))
         home_top_liq_str = format_liq_k(row.get('home_top_liq'))
-        home_topm1_liq_str = format_liq_k(row.get('home_topm1_liq'))
         
-        # Calculate bar percentages and gradients
+        # Calculate bar percentages and gradients (only for top columns, not +1c)
         away_top_liq_pct = calc_liq_bar_pct(row.get('away_top_liq'), max_liq)
-        away_topm1_liq_pct = calc_liq_bar_pct(row.get('away_topm1_liq'), max_liq)
         home_top_liq_pct = calc_liq_bar_pct(row.get('home_top_liq'), max_liq)
-        home_topm1_liq_pct = calc_liq_bar_pct(row.get('home_topm1_liq'), max_liq)
         
         away_top_liq_gradient = calc_liq_gradient(row.get('away_top_liq'), max_liq)
-        away_topm1_liq_gradient = calc_liq_gradient(row.get('away_topm1_liq'), max_liq)
         home_top_liq_gradient = calc_liq_gradient(row.get('home_top_liq'), max_liq)
-        home_topm1_liq_gradient = calc_liq_gradient(row.get('home_topm1_liq'), max_liq)
         
         # Format EVs with color classes
         away_ev_top_val = row['away_ev_top']
         away_ev_top_str = format_ev_percent(away_ev_top_val)
         away_ev_top_class = "ev-positive" if away_ev_top_val and away_ev_top_val > 0 else ("ev-negative" if away_ev_top_val and away_ev_top_val < 0 else "ev-neutral")
         
-        away_ev_topm1_val = row['away_ev_topm1']
-        away_ev_topm1_str = format_ev_percent(away_ev_topm1_val)
-        away_ev_topm1_class = "ev-positive" if away_ev_topm1_val and away_ev_topm1_val > 0 else ("ev-negative" if away_ev_topm1_val and away_ev_topm1_val < 0 else "ev-neutral")
-        
         home_ev_top_val = row['home_ev_top']
         home_ev_top_str = format_ev_percent(home_ev_top_val)
         home_ev_top_class = "ev-positive" if home_ev_top_val and home_ev_top_val > 0 else ("ev-negative" if home_ev_top_val and home_ev_top_val < 0 else "ev-neutral")
-        
-        home_ev_topm1_val = row['home_ev_topm1']
-        home_ev_topm1_str = format_ev_percent(home_ev_topm1_val)
-        home_ev_topm1_class = "ev-positive" if home_ev_topm1_val and home_ev_topm1_val > 0 else ("ev-negative" if home_ev_topm1_val and home_ev_topm1_val < 0 else "ev-neutral")
         
         away_roto = row.get('away_roto')
         away_roto_str = str(away_roto) if away_roto is not None else "N/A"
@@ -635,22 +619,12 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]]) -> str:
                         <div class="kalshi-cell-content">{away_top_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
-                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {away_topm1_liq_str}" style="--liq-pct: {away_topm1_liq_pct}; --liq-gradient: {away_topm1_liq_gradient};" data-prob="{away_topm1_val if away_topm1_val is not None else ''}" data-original="{away_topm1_str}">
-                        <div class="kalshi-cell-content">{away_topm1_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
                     <td class="kalshi-cell prob-value odds-cell" title="Liq: {home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};" data-prob="{home_top_val if home_top_val is not None else ''}" data-original="{home_top_str}">
                         <div class="kalshi-cell-content">{home_top_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
-                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {home_topm1_liq_str}" style="--liq-pct: {home_topm1_liq_pct}; --liq-gradient: {home_topm1_liq_gradient};" data-prob="{home_topm1_val if home_topm1_val is not None else ''}" data-original="{home_topm1_str}">
-                        <div class="kalshi-cell-content">{home_topm1_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
                     <td class="{away_ev_top_class}">{away_ev_top_str}</td>
-                    <td class="{away_ev_topm1_class}">{away_ev_topm1_str}</td>
                     <td class="{home_ev_top_class}">{home_ev_top_str}</td>
-                    <td class="{home_ev_topm1_class}">{home_ev_topm1_str}</td>
                 </tr>
 """
     
@@ -699,13 +673,9 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         f"{'AwayFair':<10} "
         f"{'HomeFair':<10} "
         f"{'AwayKalshi':<12} "
-        f"{'AwayKalshi-1c':<14} "
         f"{'HomeKalshi':<12} "
-        f"{'HomeKalshi-1c':<14} "
         f"{'Away_EV':<10} "
-        f"{'Away_EV-1c':<12} "
-        f"{'Home_EV':<10} "
-        f"{'Home_EV-1c':<12}"
+        f"{'Home_EV':<10}"
     )
     
     print("\n" + "=" * len(header.expandtabs()))
@@ -721,15 +691,11 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         
         # Format Kalshi break-even probabilities
         away_top_str = f"{row['away_top_prob']:.4f}" if row['away_top_prob'] is not None else "N/A"
-        away_topm1_str = f"{row['away_topm1_prob']:.4f}" if row['away_topm1_prob'] is not None else "N/A"
         home_top_str = f"{row['home_top_prob']:.4f}" if row['home_top_prob'] is not None else "N/A"
-        home_topm1_str = f"{row['home_topm1_prob']:.4f}" if row['home_topm1_prob'] is not None else "N/A"
         
         # Format EVs
         away_ev_top_str = format_ev_percent(row['away_ev_top'])
-        away_ev_topm1_str = format_ev_percent(row['away_ev_topm1'])
         home_ev_top_str = format_ev_percent(row['home_ev_top'])
-        home_ev_topm1_str = format_ev_percent(row['home_ev_topm1'])
         
         away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
         event_start = row.get('event_start')
@@ -746,13 +712,9 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
             f"{away_fair_str:<10} "
             f"{home_fair_str:<10} "
             f"{away_top_str:<12} "
-            f"{away_topm1_str:<14} "
             f"{home_top_str:<12} "
-            f"{home_topm1_str:<14} "
             f"{away_ev_top_str:<10} "
-            f"{away_ev_topm1_str:<12} "
-            f"{home_ev_top_str:<10} "
-            f"{home_ev_topm1_str:<12}"
+            f"{home_ev_top_str:<10}"
         )
     
     print("=" * len(header.expandtabs()) + "\n")
@@ -800,26 +762,28 @@ def main():
         event_ticker = game_to_event.get(i)
         prob_data = event_probs.get(event_ticker) if event_ticker else None
         
-        # Get break-even probs and liquidity
-        away_top = prob_data.get("away_top") if prob_data else None
-        away_top_m1 = prob_data.get("away_top_m1") if prob_data else None
-        home_top = prob_data.get("home_top") if prob_data else None
-        home_top_m1 = prob_data.get("home_top_m1") if prob_data else None
+        # Get YES break-even probs and YES bid liquidity (user-facing: YES exposure, maker prices)
+        yes_be_top_away = prob_data.get("yes_be_top_away") if prob_data else None
+        yes_be_topm1_away = prob_data.get("yes_be_topm1_away") if prob_data else None
+        yes_be_top_home = prob_data.get("yes_be_top_home") if prob_data else None
+        yes_be_topm1_home = prob_data.get("yes_be_topm1_home") if prob_data else None
         
-        away_top_liq = prob_data.get("away_top_liq") if prob_data else None
-        away_topm1_liq = prob_data.get("away_topm1_liq") if prob_data else None
-        home_top_liq = prob_data.get("home_top_liq") if prob_data else None
-        home_topm1_liq = prob_data.get("home_topm1_liq") if prob_data else None
+        # Internal: YES bid liquidity (from orderbook["yes"] bids, maker prices)
+        yes_bid_top_liq_away = prob_data.get("yes_bid_top_liq_away") if prob_data else None
+        yes_bid_top_p1_liq_away = prob_data.get("yes_bid_top_p1_liq_away") if prob_data else None
+        yes_bid_top_liq_home = prob_data.get("yes_bid_top_liq_home") if prob_data else None
+        yes_bid_top_p1_liq_home = prob_data.get("yes_bid_top_p1_liq_home") if prob_data else None
         
-        # Compute EVs (seller/post-maker perspective)
-        # EV = (Kalshi effective sale price - Unabated fair value) * 100
-        away_fair = game.get("away_fair")
-        home_fair = game.get("home_fair")
+        # Compute EVs (buyer/YES exposure perspective)
+        # EV = (Unabated fair win prob - Kalshi break-even cost) * 100
+        # Positive EV means fair > cost, so buying YES is profitable
+        away_fair = game.get("away_fair")  # p_yes_fair_away
+        home_fair = game.get("home_fair")  # p_yes_fair_home
         
-        away_ev_top = compute_ev_percent(away_fair, away_top)
-        away_ev_topm1 = compute_ev_percent(away_fair, away_top_m1)
-        home_ev_top = compute_ev_percent(home_fair, home_top)
-        home_ev_topm1 = compute_ev_percent(home_fair, home_top_m1)
+        away_ev_top = compute_ev_percent(away_fair, yes_be_top_away)
+        away_ev_topm1 = compute_ev_percent(away_fair, yes_be_topm1_away)
+        home_ev_top = compute_ev_percent(home_fair, yes_be_top_home)
+        home_ev_topm1 = compute_ev_percent(home_fair, yes_be_topm1_home)
         
         table_rows.append({
             "game_date": game.get("game_date", "N/A"),
@@ -832,14 +796,14 @@ def main():
             "event_ticker": event_ticker or "N/A",
             "away_ticker": game.get("away_kalshi_ticker") or "N/A",
             "home_ticker": game.get("home_kalshi_ticker") or "N/A",
-            "away_top_prob": away_top,
-            "away_topm1_prob": away_top_m1,
-            "home_top_prob": home_top,
-            "home_topm1_prob": home_top_m1,
-            "away_top_liq": away_top_liq,
-            "away_topm1_liq": away_topm1_liq,
-            "home_top_liq": home_top_liq,
-            "home_topm1_liq": home_topm1_liq,
+            "away_top_prob": yes_be_top_away,  # YES break-even probability (user-facing)
+            "away_topm1_prob": yes_be_topm1_away,
+            "home_top_prob": yes_be_top_home,
+            "home_topm1_prob": yes_be_topm1_home,
+            "away_top_liq": yes_bid_top_liq_away,  # YES bid liquidity (from orderbook["yes"], maker prices)
+            "away_topm1_liq": yes_bid_top_p1_liq_away,
+            "home_top_liq": yes_bid_top_liq_home,
+            "home_topm1_liq": yes_bid_top_p1_liq_home,
             "away_ev_top": away_ev_top,
             "away_ev_topm1": away_ev_topm1,
             "home_ev_top": home_ev_top,
@@ -862,13 +826,9 @@ def main():
         f"{'AwayTicker':<30} "
         f"{'HomeTicker':<30} "
         f"{'Away_top_prob':<13} "
-        f"{'Away_topm1_prob':<15} "
         f"{'Home_top_prob':<13} "
-        f"{'Home_topm1_prob':<15} "
         f"{'Away_EV_top_%':<13} "
-        f"{'Away_EV_topm1_%':<15} "
-        f"{'Home_EV_top_%':<13} "
-        f"{'Home_EV_topm1_%':<15}"
+        f"{'Home_EV_top_%':<13}"
     )
     
     print(header)
@@ -880,14 +840,10 @@ def main():
         home_fair_str = f"{row['home_fair']:.3f}" if row['home_fair'] is not None else "N/A"
         
         away_top_str = f"{row['away_top_prob']:.4f}" if row['away_top_prob'] is not None else "N/A"
-        away_topm1_str = f"{row['away_topm1_prob']:.4f}" if row['away_topm1_prob'] is not None else "N/A"
         home_top_str = f"{row['home_top_prob']:.4f}" if row['home_top_prob'] is not None else "N/A"
-        home_topm1_str = f"{row['home_topm1_prob']:.4f}" if row['home_topm1_prob'] is not None else "N/A"
         
         away_ev_top_str = format_ev_percent(row['away_ev_top'])
-        away_ev_topm1_str = format_ev_percent(row['away_ev_topm1'])
         home_ev_top_str = format_ev_percent(row['home_ev_top'])
-        home_ev_topm1_str = format_ev_percent(row['home_ev_topm1'])
         
         away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
         event_start = row.get('event_start')
@@ -907,13 +863,9 @@ def main():
             f"{row['away_ticker']:<30} "
             f"{row['home_ticker']:<30} "
             f"{away_top_str:<13} "
-            f"{away_topm1_str:<15} "
             f"{home_top_str:<13} "
-            f"{home_topm1_str:<15} "
             f"{away_ev_top_str:<13} "
-            f"{away_ev_topm1_str:<15} "
-            f"{home_ev_top_str:<13} "
-            f"{home_ev_topm1_str:<15}"
+            f"{home_ev_top_str:<13}"
         )
     
     # Step 5: Open dashboard in browser window

@@ -1,106 +1,105 @@
 """
-Calculate maker-fee break-even probabilities for top-of-book posting scenarios.
+Calculate maker-fee break-even probabilities for YES exposure (team winning) scenarios.
+
+Internal: Reads YES bids from orderbook["yes"] for maker prices (join bid queue).
+Also reads NO bids to derive YES ask for crossing check.
+User-facing: YES exposure (what price to pay for win exposure).
+
+Queue-jump: YES bid top+1¢ is simply top+1 (simple increment, no API lookup needed).
 """
 
 import sys
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from core.reusable_functions import fetch_orderbook
 from utils.kalshi_api import load_creds
 from pricing.fees import maker_fee_cents
 
 
-def get_yes_ask_prices_and_liquidity(orderbook: Dict[str, Any]) -> tuple:
+def get_yes_bid_top_and_liquidity(orderbook: Dict[str, Any]) -> Tuple[Optional[int], Optional[int], Dict[int, int]]:
     """
-    Extract best YES ask, inside ask, and their liquidity from orderbook.
+    Extract top YES bid price and its liquidity from orderbook.
     
-    Best YES ask = 100 - max(NO bid prices)
-    Inside ask = best_ask - 1 if best_ask >= 2, else None
-    Liquidity = quantity of NO bids at the corresponding price level
+    Internal function: Reads orderbook["yes"] bids (maker prices for YES exposure).
     
     Args:
-        orderbook: Kalshi orderbook dict with "no" bid array (format: [[price_cents, qty], ...])
+        orderbook: Kalshi orderbook dict with "yes" bid array (format: [[price_cents, qty], ...])
     
     Returns:
-        (best_yes_ask_cents, inside_yes_ask_cents, best_ask_liq, inside_ask_liq)
-        Liquidity values are quantities (int) or None if no liquidity
+        (yes_bid_top_c, yes_bid_top_liq, yes_bids_by_price_dict)
+        - yes_bid_top_c: Maximum YES bid price in cents, or None
+        - yes_bid_top_liq: Total liquidity (quantity) at top YES bid price, or None
+        - yes_bids_by_price_dict: Dict mapping price -> total quantity for all YES bid levels
     """
-    no_bids = orderbook.get("no") or []
+    yes_bids = orderbook.get("yes") or []
     
-    if not no_bids or not isinstance(no_bids, list):
-        return (None, None, None, None)
+    if not yes_bids or not isinstance(yes_bids, list):
+        return (None, None, {})
     
-    # Find max NO bid price and its liquidity (don't assume ordering)
-    max_no_bid_price = None
-    max_no_bid_qty = None
+    # Find max YES bid price and accumulate quantities by price
+    yes_bid_top_c = None
+    yes_bids_by_price = {}
     
-    # Also collect all NO bids by price for liquidity lookup
-    no_bids_by_price = {}
-    
-    for bid in no_bids:
+    for bid in yes_bids:
         if isinstance(bid, list) and len(bid) >= 2:
-            price = bid[0]
-            qty = bid[1]
+            price_cents = int(bid[0])
+            qty = int(bid[1])
             
             # Track max price
-            if max_no_bid_price is None or price > max_no_bid_price:
-                max_no_bid_price = price
-                max_no_bid_qty = qty
+            if yes_bid_top_c is None or price_cents > yes_bid_top_c:
+                yes_bid_top_c = price_cents
             
             # Accumulate quantities by price (in case multiple entries at same price)
-            if price in no_bids_by_price:
-                no_bids_by_price[price] += qty
+            if price_cents in yes_bids_by_price:
+                yes_bids_by_price[price_cents] += qty
             else:
-                no_bids_by_price[price] = qty
+                yes_bids_by_price[price_cents] = qty
     
-    if max_no_bid_price is None:
-        return (None, None, None, None)
+    # Get liquidity at top price
+    yes_bid_top_liq = yes_bids_by_price.get(yes_bid_top_c, 0) if yes_bid_top_c is not None else None
     
-    # Best YES ask = 100 - max(NO bid price)
-    best_yes_ask_cents = 100 - max_no_bid_price
-    
-    # Liquidity at best ask = quantity of NO bids at max price
-    best_ask_liq = no_bids_by_price.get(max_no_bid_price, 0) if max_no_bid_price else None
-    
-    # Inside ask = best_ask - 1 if best_ask >= 2
-    inside_yes_ask_cents = best_yes_ask_cents - 1 if best_yes_ask_cents >= 2 else None
-    
-    # Liquidity at inside ask = quantity of NO bids at price = 100 - inside_ask
-    inside_ask_liq = None
-    if inside_yes_ask_cents is not None:
-        corresponding_no_bid_price = 100 - inside_yes_ask_cents
-        inside_ask_liq = no_bids_by_price.get(corresponding_no_bid_price, 0)
-    
-    return (best_yes_ask_cents, inside_yes_ask_cents, best_ask_liq, inside_ask_liq)
+    return (yes_bid_top_c, yes_bid_top_liq, yes_bids_by_price)
 
 
-def maker_post_break_even_prob(price_cents: int) -> Optional[float]:
+def yes_break_even_prob(yes_px_cents: int) -> Optional[float]:
     """
-    Calculate maker-fee break-even win probability for a posted price.
+    Calculate maker-fee break-even win probability for YES exposure at a given YES price.
     
-    Break-even formula: p_win_be = p / (1 - fee_on_win)
-    Where:
-    - p = price_cents / 100.0
-    - fee_on_win = maker_fee_cents(price_cents, 1) / 100.0
+    This answers: "What win probability do I need to break even if I pay this YES price as maker?"
+    
+    Maker fee formula (for C contracts): fees_total = ceil(0.0175 * C * P * (1-P) * 100) cents
+    Per-contract fee: fee_per_contract = fees_total / C
+    
+    After-fee price per contract: after_fee = yes_px_cents + fee_per_contract
+    
+    Break-even formula: p_win_be = after_fee / 100.0
+    
+    We use C=1000 contracts for fee calculation (standard Kalshi sizing).
     
     Args:
-        price_cents: Posted price in cents
+        yes_px_cents: YES price in cents (what you pay for win exposure)
     
     Returns:
-        Break-even probability (0.0-1.0) or None if invalid
+        Break-even win probability (0.0-1.0) or None if invalid
     """
-    if price_cents <= 0 or price_cents >= 100:
+    if yes_px_cents <= 0 or yes_px_cents >= 100:
         return None
     
-    p = price_cents / 100.0
-    fee_on_win_cents = maker_fee_cents(price_cents, contracts=1)
-    fee_on_win = fee_on_win_cents / 100.0
+    # Use 1000 contracts for fee calculation (matches Kalshi UI)
+    C = 1000
+    P = yes_px_cents / 100.0
     
-    # Break-even: p_win_be = p / (1 - fee_on_win)
-    if fee_on_win >= 1.0:
-        return None  # Invalid (would require >100% fee)
+    # Calculate total fee for C contracts, rounded up
+    fee_total_cents = maker_fee_cents(yes_px_cents, contracts=C)
     
-    p_win_be = p / (1.0 - fee_on_win)
+    # Per-contract fee in cents
+    fee_per_contract_cents = fee_total_cents / C
+    
+    # After-fee price per contract (in cents)
+    after_fee_cents = yes_px_cents + fee_per_contract_cents
+    
+    # Convert to probability (0-1 range)
+    p_win_be = after_fee_cents / 100.0
     
     # Clamp to valid probability range
     if p_win_be < 0.0:
@@ -152,80 +151,96 @@ def parse_event_ticker(event_ticker: str) -> Dict[str, str]:
     }
 
 
-def get_market_post_probs(market_ticker: str, api_key_id: str, private_key_pem: str) -> Dict[str, Any]:
+def get_market_yes_exposure_data(market_ticker: str, api_key_id: str, private_key_pem: str) -> Dict[str, Any]:
     """
-    Get top-of-book maker posting break-even probabilities and liquidity for a single market.
+    Get YES exposure data for a single market (team winning).
+    
+    Internal: Reads YES bids from orderbook["yes"] for maker prices.
+    User-facing: Returns YES bid prices and break-even probabilities.
+    
+    Queue-jump: YES bid top+1¢ is simply top+1 (no API lookup needed, just increment).
     
     Returns:
-        Dict with: best_ask_cents, inside_ask_cents, top_prob, top_m1_prob, 
-                   best_ask_liq, inside_ask_liq, error
+        Dict with:
+        - yes_bid_top_c, yes_bid_top_p1_c: YES bid prices (internal, maker)
+        - yes_be_top, yes_be_topm1: Break-even win probabilities (user-facing, fee-adjusted)
+        - yes_bid_top_liq: Liquidity from YES bids at top
+        - yes_bid_top_p1_liq: Always None (theoretical price, not in book)
+        - error: Error message if any
     """
     market_ticker = market_ticker.strip().upper()
     
-    # Fetch orderbook
+    # Fetch orderbook (read YES bids for maker prices)
     orderbook = fetch_orderbook(api_key_id, private_key_pem, market_ticker)
     if not orderbook:
         return {
-            "best_ask_cents": None,
-            "inside_ask_cents": None,
-            "top_prob": None,
-            "top_m1_prob": None,
-            "best_ask_liq": None,
-            "inside_ask_liq": None,
+            "yes_bid_top_c": None,
+            "yes_bid_top_p1_c": None,
+            "yes_be_top": None,
+            "yes_be_topm1": None,
+            "yes_bid_top_liq": None,
+            "yes_bid_top_p1_liq": None,
             "error": "No orderbook"
         }
     
-    # Debug: Print ladder sizes (temporary)
-    yes_levels = len(orderbook.get("yes", []))
-    no_levels = len(orderbook.get("no", []))
-    print(f"  {market_ticker}: Orderbook levels: yes={yes_levels} no={no_levels}")
+    # Extract YES bid top price and liquidity (maker prices)
+    yes_bid_top_c, yes_bid_top_liq, yes_bids_by_price = get_yes_bid_top_and_liquidity(orderbook)
     
-    # Extract ask prices and liquidity
-    best_ask, inside_ask, best_ask_liq, inside_ask_liq = get_yes_ask_prices_and_liquidity(orderbook)
-    
-    # Handle no liquidity case
-    if best_ask is None:
+    # Handle no YES bids case
+    if yes_bid_top_c is None:
         return {
-            "best_ask_cents": None,
-            "inside_ask_cents": None,
-            "top_prob": None,
-            "top_m1_prob": None,
-            "best_ask_liq": None,
-            "inside_ask_liq": None,
-            "error": f"No NO bids; cannot derive YES ask (yes_levels={yes_levels}, no_levels={no_levels})"
+            "yes_bid_top_c": None,
+            "yes_bid_top_p1_c": None,
+            "yes_be_top": None,
+            "yes_be_topm1": None,
+            "yes_bid_top_liq": None,
+            "yes_bid_top_p1_liq": None,
+            "error": "No YES bids found"
         }
     
-    # Calculate break-even probabilities (maker fee)
-    top_prob = maker_post_break_even_prob(best_ask)
-    top_m1_prob = maker_post_break_even_prob(inside_ask) if inside_ask is not None else None
+    # Compute queue-jump YES bid: top + 1¢ (simple increment, no API lookup needed)
+    # This is a theoretical price for queue-jump, not necessarily in the book
+    yes_bid_top_p1_c = yes_bid_top_c + 1 if yes_bid_top_c < 99 else None
+    
+    # No liquidity lookup for +1c level (it's a theoretical price, not in the book)
+    yes_bid_top_p1_liq = None
+    
+    # Calculate break-even win probabilities for YES bid prices (maker fee, using 1000 contracts)
+    yes_be_top = yes_break_even_prob(yes_bid_top_c)
+    yes_be_topm1 = yes_break_even_prob(yes_bid_top_p1_c) if yes_bid_top_p1_c is not None else None
     
     return {
-        "best_ask_cents": best_ask,
-        "inside_ask_cents": inside_ask,
-        "top_prob": top_prob,
-        "top_m1_prob": top_m1_prob,
-        "best_ask_liq": best_ask_liq,
-        "inside_ask_liq": inside_ask_liq,
+        "yes_bid_top_c": yes_bid_top_c,
+        "yes_bid_top_p1_c": yes_bid_top_p1_c,
+        "yes_be_top": yes_be_top,
+        "yes_be_topm1": yes_be_topm1,
+        "yes_bid_top_liq": yes_bid_top_liq,
+        "yes_bid_top_p1_liq": yes_bid_top_p1_liq,
         "error": None
     }
 
 
 def get_top_of_book_post_probs(event_ticker: str) -> Dict[str, Any]:
     """
-    Get top-of-book maker posting break-even probabilities for both teams in an event.
+    Get YES exposure data for both teams in an event.
+    
+    Internal: Reads YES bids from orderbook["yes"] for maker prices.
+    User-facing: Returns YES break-even probabilities and prices.
     
     Args:
         event_ticker: Kalshi event ticker (e.g., KXNBAGAME-26JAN08MIACHI)
     
     Returns:
         Dict with:
-        - event_ticker: str
-        - away_code, home_code: str
+        - event_ticker, away_code, home_code: str
         - away_market_ticker, home_market_ticker: str
-        - away_top, away_top_m1: float | None (maker-fee break-even probabilities 0-1)
-        - home_top, home_top_m1: float | None
-        - away_best_ask_cents, away_inside_ask_cents: int | None (debug)
-        - home_best_ask_cents, home_inside_ask_cents: int | None (debug)
+        - yes_be_top_away, yes_be_topm1_away: float | None (break-even win probabilities 0-1)
+        - yes_be_top_home, yes_be_topm1_home: float | None
+        - yes_bid_top_c_away, yes_bid_top_p1_c_away: int | None (YES bid prices in cents, maker)
+        - yes_bid_top_c_home, yes_bid_top_p1_c_home: int | None
+        - yes_bid_top_liq_away, yes_bid_top_p1_liq_away: int | None (liquidity from YES bids)
+        - yes_bid_top_liq_home, yes_bid_top_p1_liq_home: int | None
+        - error: str | None
     """
     # Normalize event ticker
     event_ticker = event_ticker.strip().upper()
@@ -242,18 +257,18 @@ def get_top_of_book_post_probs(event_ticker: str) -> Dict[str, Any]:
             "home_code": None,
             "away_market_ticker": None,
             "home_market_ticker": None,
-            "away_top": None,
-            "away_top_m1": None,
-            "home_top": None,
-            "home_top_m1": None,
-            "away_best_ask_cents": None,
-            "away_inside_ask_cents": None,
-            "home_best_ask_cents": None,
-            "home_inside_ask_cents": None,
-            "away_top_liq": None,
-            "away_topm1_liq": None,
-            "home_top_liq": None,
-            "home_topm1_liq": None,
+            "yes_be_top_away": None,
+            "yes_be_topm1_away": None,
+            "yes_be_top_home": None,
+            "yes_be_topm1_home": None,
+            "yes_bid_top_c_away": None,
+            "yes_bid_top_p1_c_away": None,
+            "yes_bid_top_c_home": None,
+            "yes_bid_top_p1_c_home": None,
+            "yes_bid_top_liq_away": None,
+            "yes_bid_top_p1_liq_away": None,
+            "yes_bid_top_liq_home": None,
+            "yes_bid_top_p1_liq_home": None,
             "error": str(e)
         }
     
@@ -271,24 +286,24 @@ def get_top_of_book_post_probs(event_ticker: str) -> Dict[str, Any]:
             "home_code": home_code,
             "away_market_ticker": away_market,
             "home_market_ticker": home_market,
-            "away_top": None,
-            "away_top_m1": None,
-            "home_top": None,
-            "home_top_m1": None,
-            "away_best_ask_cents": None,
-            "away_inside_ask_cents": None,
-            "home_best_ask_cents": None,
-            "home_inside_ask_cents": None,
-            "away_top_liq": None,
-            "away_topm1_liq": None,
-            "home_top_liq": None,
-            "home_topm1_liq": None,
+            "yes_be_top_away": None,
+            "yes_be_topm1_away": None,
+            "yes_be_top_home": None,
+            "yes_be_topm1_home": None,
+            "yes_bid_top_c_away": None,
+            "yes_bid_top_p1_c_away": None,
+            "yes_bid_top_c_home": None,
+            "yes_bid_top_p1_c_home": None,
+            "yes_bid_top_liq_away": None,
+            "yes_bid_top_p1_liq_away": None,
+            "yes_bid_top_liq_home": None,
+            "yes_bid_top_p1_liq_home": None,
             "error": f"Failed to load credentials: {e}"
         }
     
-    # Fetch probabilities and liquidity for both markets
-    away_result = get_market_post_probs(away_market, api_key_id, private_key_pem)
-    home_result = get_market_post_probs(home_market, api_key_id, private_key_pem)
+    # Fetch YES exposure data for both markets (reads YES bids for maker prices)
+    away_result = get_market_yes_exposure_data(away_market, api_key_id, private_key_pem)
+    home_result = get_market_yes_exposure_data(home_market, api_key_id, private_key_pem)
     
     return {
         "event_ticker": event_ticker,
@@ -296,27 +311,27 @@ def get_top_of_book_post_probs(event_ticker: str) -> Dict[str, Any]:
         "home_code": home_code,
         "away_market_ticker": away_market,
         "home_market_ticker": home_market,
-        "away_top": away_result["top_prob"],
-        "away_top_m1": away_result["top_m1_prob"],
-        "home_top": home_result["top_prob"],
-        "home_top_m1": home_result["top_m1_prob"],
-        "away_best_ask_cents": away_result["best_ask_cents"],
-        "away_inside_ask_cents": away_result["inside_ask_cents"],
-        "home_best_ask_cents": home_result["best_ask_cents"],
-        "home_inside_ask_cents": home_result["inside_ask_cents"],
-        "away_top_liq": away_result.get("best_ask_liq"),
-        "away_topm1_liq": away_result.get("inside_ask_liq"),
-        "home_top_liq": home_result.get("best_ask_liq"),
-        "home_topm1_liq": home_result.get("inside_ask_liq"),
+        "yes_be_top_away": away_result["yes_be_top"],
+        "yes_be_topm1_away": away_result["yes_be_topm1"],
+        "yes_be_top_home": home_result["yes_be_top"],
+        "yes_be_topm1_home": home_result["yes_be_topm1"],
+        "yes_bid_top_c_away": away_result["yes_bid_top_c"],
+        "yes_bid_top_p1_c_away": away_result["yes_bid_top_p1_c"],
+        "yes_bid_top_c_home": home_result["yes_bid_top_c"],
+        "yes_bid_top_p1_c_home": home_result["yes_bid_top_p1_c"],
+        "yes_bid_top_liq_away": away_result["yes_bid_top_liq"],
+        "yes_bid_top_p1_liq_away": away_result["yes_bid_top_p1_liq"],
+        "yes_bid_top_liq_home": home_result["yes_bid_top_liq"],
+        "yes_bid_top_p1_liq_home": home_result["yes_bid_top_p1_liq"],
         "error": away_result.get("error") or home_result.get("error")
     }
 
 
 def format_output(result: Dict[str, Any]) -> str:
     """
-    Format result as one-line summary.
+    Format result as one-line summary (YES exposure break-even probabilities).
     
-    Format: event_ticker | away=CODE top=0.xxxx top-1=0.xxxx | home=CODE top=0.xxxx top-1=0.xxxx
+    Format: event_ticker | away=CODE top=0.xxxx top+1=0.xxxx | home=CODE top=0.xxxx top+1=0.xxxx
     """
     event_ticker = result.get("event_ticker", "")
     
@@ -326,20 +341,20 @@ def format_output(result: Dict[str, Any]) -> str:
     away_code = result.get("away_code", "???")
     home_code = result.get("home_code", "???")
     
-    away_top = result.get("away_top")
-    away_top_m1 = result.get("away_top_m1")
-    home_top = result.get("home_top")
-    home_top_m1 = result.get("home_top_m1")
+    yes_be_top_away = result.get("yes_be_top_away")
+    yes_be_topm1_away = result.get("yes_be_topm1_away")
+    yes_be_top_home = result.get("yes_be_top_home")
+    yes_be_topm1_home = result.get("yes_be_topm1_home")
     
     # Format away section
-    away_top_str = f"{away_top:.4f}" if away_top is not None else "N/A"
-    away_top_m1_str = f"{away_top_m1:.4f}" if away_top_m1 is not None else "N/A"
-    away_section = f"away={away_code} top={away_top_str} top-1={away_top_m1_str}"
+    away_top_str = f"{yes_be_top_away:.4f}" if yes_be_top_away is not None else "N/A"
+    away_top_m1_str = f"{yes_be_topm1_away:.4f}" if yes_be_topm1_away is not None else "N/A"
+    away_section = f"away={away_code} top={away_top_str} top+1={away_top_m1_str}"
     
     # Format home section
-    home_top_str = f"{home_top:.4f}" if home_top is not None else "N/A"
-    home_top_m1_str = f"{home_top_m1:.4f}" if home_top_m1 is not None else "N/A"
-    home_section = f"home={home_code} top={home_top_str} top-1={home_top_m1_str}"
+    home_top_str = f"{yes_be_top_home:.4f}" if yes_be_top_home is not None else "N/A"
+    home_top_m1_str = f"{yes_be_topm1_home:.4f}" if yes_be_topm1_home is not None else "N/A"
+    home_section = f"home={home_code} top={home_top_str} top+1={home_top_m1_str}"
     
     return f"{event_ticker} | {away_section} | {home_section}"
 
