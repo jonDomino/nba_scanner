@@ -8,6 +8,7 @@ secrets/
 secrets_local.py
 streamlit_secrets.toml
 STREAMLIT_SECRETS_COPY_PASTE.txt
+STREAMLIT_SECRETS_FORMAT.md
 
 # Python
 __pycache__/
