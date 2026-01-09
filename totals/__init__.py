@@ -1,0 +1,1 @@
+"""Totals module: build totals table from shared bundle."""

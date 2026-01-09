@@ -20,13 +20,13 @@ User-facing: Display "price to get exposure to Over/Under X.Y".
 import re
 from typing import Dict, Any, List, Optional, Tuple
 
-from nba_todays_fairs import get_team_name
-from nba_today_xref_tickers import get_today_games_with_fairs_and_kalshi_tickers
+from data_build.unabated_callsheet import get_team_name
+from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
 from core.reusable_functions import (
     fetch_kalshi_markets_for_event,
     load_team_xref
 )
-from nba_spreads_dashboard import get_spread_orderbook_data
+from spreads.builder import get_spread_orderbook_data
 from utils import config
 from utils.kalshi_api import load_creds
 
@@ -694,7 +694,7 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
     teams_dict = snapshot.get("teams", {})
     
     # Get today's games
-    from nba_todays_fairs import extract_nba_games_today
+    from data_build.unabated_callsheet import extract_nba_games_today
     today_events = extract_nba_games_today(snapshot)
     
     # Build event lookup by event_start
@@ -917,7 +917,7 @@ def print_totals_table(totals_rows: List[Dict[str, Any]]):
     print("-" * len(header.expandtabs()))
     
     # Import formatting functions from main dashboard
-    from nba_value_table import format_game_time_pst, is_game_started
+    from moneylines.table import format_game_time_pst, is_game_started
     
     for row in totals_rows:
         # Format game time

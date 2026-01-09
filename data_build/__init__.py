@@ -1,0 +1,1 @@
+"""Data build module: shared data fetching and bundle creation."""

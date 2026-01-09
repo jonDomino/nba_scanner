@@ -18,15 +18,15 @@ import re
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal
 
-from nba_todays_fairs import get_today_games_with_fairs, utc_to_la_datetime, get_team_name
-from nba_today_xref_tickers import get_today_games_with_fairs_and_kalshi_tickers
+from data_build.unabated_callsheet import get_today_games_with_fairs, utc_to_la_datetime, get_team_name
+from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
 from core.reusable_functions import (
     fetch_kalshi_markets_for_event,
     fetch_orderbook,
     load_team_xref,
     team_to_kalshi_code
 )
-from kalshi_top_of_book_probs import (
+from data_build.top_of_book import (
     get_yes_bid_top_and_liquidity,
     yes_break_even_prob
 )
@@ -772,7 +772,7 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
     teams_dict = snapshot.get("teams", {})
     
     # Get today's games with spreads
-    from nba_todays_fairs import extract_nba_games_today
+    from data_build.unabated_callsheet import extract_nba_games_today
     today_events = extract_nba_games_today(snapshot)
     
     # Build event lookup by event_start
@@ -1118,7 +1118,7 @@ def print_spreads_table(spread_rows: List[Dict[str, Any]]):
     print("-" * len(header.expandtabs()))
     
     # Import formatting functions from main dashboard
-    from nba_value_table import format_game_time_pst, is_game_started, format_ev_percent
+    from moneylines.table import format_game_time_pst, is_game_started, format_ev_percent
     
     for row in spread_rows:
         # Format game time

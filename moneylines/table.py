@@ -28,8 +28,8 @@ except ImportError:
     import pytz
     USE_PYTZ = True
 
-from nba_today_xref_tickers import get_today_games_with_fairs_and_kalshi_tickers
-from kalshi_top_of_book_probs import get_top_of_book_post_probs
+from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
+from data_build.top_of_book import get_top_of_book_post_probs
 
 
 def derive_event_ticker(market_ticker: str) -> Optional[str]:
@@ -1121,7 +1121,7 @@ def main():
     # Step 5: Get spreads data (additive feature, zero impact on moneylines)
     spread_rows = []
     try:
-        from nba_spreads_dashboard import build_spreads_rows_for_today, print_spreads_table
+        from spreads.builder import build_spreads_rows_for_today, print_spreads_table
         spread_rows = build_spreads_rows_for_today()
     except Exception as e:
         # Silently ignore errors in spreads module (don't break moneylines)
@@ -1130,7 +1130,7 @@ def main():
     # Step 6: Get totals data (additive feature, zero impact on moneylines/spreads)
     totals_rows = []
     try:
-        from nba_totals_dashboard import build_totals_rows_for_today, print_totals_table
+        from totals.builder import build_totals_rows_for_today, print_totals_table
         totals_rows = build_totals_rows_for_today()
     except Exception as e:
         # Silently ignore errors in totals module (don't break moneylines/spreads)

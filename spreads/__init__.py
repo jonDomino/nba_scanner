@@ -1,0 +1,1 @@
+"""Spreads module: build spreads table from shared bundle."""

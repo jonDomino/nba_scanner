@@ -237,7 +237,7 @@ def main():
         return
     
     print(f"Found {len(games)} game(s)")
-    print("\nNOTE: This module no longer determines away/home. Use nba_today_xref_tickers.py for complete data.")
+    print("\nNOTE: This module no longer determines away/home. Use data_build.slate for complete data.")
     for game in games[:3]:  # Show first 3 games for debugging
         print(f"\nGame date: {game['game_date']}")
         print(f"Teams by ID: {game['teams_by_id']}")
