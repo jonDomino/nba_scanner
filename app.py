@@ -73,20 +73,12 @@ def main():
     """Main Streamlit app function."""
     st.title("🏀 NBA Value Dashboard")
     
-    # Debug: Check if secrets are loaded
-    # Check environment variables to verify secrets were set
-    if not os.getenv('UNABATED_API_KEY'):
-        st.error("❌ UNABATED_API_KEY not found in environment variables")
-        st.info("Please ensure secrets are configured in Streamlit Cloud: Settings → Secrets")
-        if hasattr(st, 'secrets'):
-            try:
-                available_keys = list(st.secrets.keys()) if hasattr(st.secrets, 'keys') else "Unable to read"
-                st.write("Available secrets keys:", available_keys)
-            except:
-                st.write("st.secrets exists but cannot read keys")
-        st.stop()
-    # Only show success message if we're debugging (can be removed later)
-    # st.success("✅ Secrets loaded successfully")
+    # Note: Credentials can come from multiple sources:
+    # 1. Streamlit Cloud secrets (st.secrets) - handled at top of file
+    # 2. Environment variables
+    # 3. Local files (secrets_local.py, .pem files, etc.) - handled by config.py
+    # The app will attempt to load data, and if credentials are truly missing,
+    # the error will surface from the data fetching functions with a clear message.
     
     # Sidebar with refresh controls
     with st.sidebar:
