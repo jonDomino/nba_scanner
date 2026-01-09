@@ -5,6 +5,7 @@
 *.env
 .env
 secrets/
+secrets_local.py
 
 # Python
 __pycache__/
