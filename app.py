@@ -24,27 +24,32 @@ if hasattr(st, 'secrets'):
         # Try to access secrets - this may raise StreamlitSecretNotFoundError if no secrets file exists
         secrets_dict = st.secrets
         
-        # Access secrets using dictionary-style (standard Streamlit pattern)
-        # Use .get() to safely check for keys and avoid KeyError
-        kalshi_key_id = secrets_dict.get('KALSHI_API_KEY_ID')
-        if kalshi_key_id:
-            os.environ['KALSHI_API_KEY_ID'] = str(kalshi_key_id)
-        
-        kalshi_private_key = secrets_dict.get('KALSHI_PRIVATE_KEY_PEM')
-        if kalshi_private_key:
-            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(kalshi_private_key)
-        
-        unabated_key = secrets_dict.get('UNABATED_API_KEY')
-        if unabated_key:
-            os.environ['UNABATED_API_KEY'] = str(unabated_key)
-            
-    except (StreamlitSecretNotFoundError, AttributeError, KeyError, TypeError):
+        # Try dictionary access first, then attribute access as fallback
+        # Streamlit secrets can be accessed both ways
+        for key in ['KALSHI_API_KEY_ID', 'KALSHI_PRIVATE_KEY_PEM', 'UNABATED_API_KEY']:
+            try:
+                # Try dictionary-style access
+                value = secrets_dict[key]
+                if value:
+                    os.environ[key] = str(value)
+            except (KeyError, TypeError):
+                try:
+                    # Try attribute-style access
+                    value = getattr(secrets_dict, key)
+                    if value:
+                        os.environ[key] = str(value)
+                except (AttributeError, TypeError):
+                    # Key not found - that's OK, will use fallback
+                    pass
+                    
+    except (StreamlitSecretNotFoundError, AttributeError, KeyError, TypeError) as e:
         # Secrets file doesn't exist or can't be read - this is OK for local testing
         # Will fall back to environment variables or local files
         pass
-    except Exception:
-        # Any other error - silently ignore and use fallback methods
-        pass
+    except Exception as e:
+        # Any other error - log for debugging but don't fail
+        import sys
+        print(f"Note: Error reading Streamlit secrets: {type(e).__name__}: {e}", file=sys.stderr)
 
 from orchestrator_moneylines import build_moneylines_rows, build_dashboard_html_moneylines
 
@@ -80,12 +85,39 @@ def main():
     """Main Streamlit app function."""
     st.title("🏀 NBA Value Dashboard")
     
-    # Note: Credentials can come from multiple sources:
-    # 1. Streamlit Cloud secrets (st.secrets) - handled at top of file
-    # 2. Environment variables
-    # 3. Local files (secrets_local.py, .pem files, etc.) - handled by config.py
-    # The app will attempt to load data, and if credentials are truly missing,
-    # the error will surface from the data fetching functions with a clear message.
+    # Debug: Show secrets status (only in Streamlit Cloud for debugging)
+    if hasattr(st, 'secrets'):
+        try:
+            # Check what secrets are available
+            secrets_available = []
+            try:
+                # Try to get list of keys
+                if hasattr(st.secrets, 'keys'):
+                    secrets_available = list(st.secrets.keys())
+                elif hasattr(st.secrets, '__dict__'):
+                    secrets_available = list(st.secrets.__dict__.keys())
+            except:
+                pass
+            
+            # Check environment variables
+            env_vars_set = []
+            if os.getenv('KALSHI_API_KEY_ID'):
+                env_vars_set.append('KALSHI_API_KEY_ID')
+            if os.getenv('KALSHI_PRIVATE_KEY_PEM'):
+                env_vars_set.append('KALSHI_PRIVATE_KEY_PEM')
+            if os.getenv('UNABATED_API_KEY'):
+                env_vars_set.append('UNABATED_API_KEY')
+            
+            # Show debug info if secrets or env vars are missing
+            if not os.getenv('UNABATED_API_KEY'):
+                with st.expander("🔍 Debug: Secrets Status", expanded=False):
+                    st.write(f"**Available secrets keys:** {secrets_available}")
+                    st.write(f"**Environment variables set:** {env_vars_set}")
+                    st.write(f"**UNABATED_API_KEY in env:** {bool(os.getenv('UNABATED_API_KEY'))}")
+                    st.write(f"**UNABATED_API_KEY in secrets:** {'UNABATED_API_KEY' in (secrets_available if secrets_available else [])}")
+        except Exception as e:
+            # Ignore debug errors
+            pass
     
     # Sidebar with refresh controls
     with st.sidebar:
