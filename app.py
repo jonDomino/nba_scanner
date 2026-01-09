@@ -8,22 +8,36 @@ import os
 import streamlit as st
 from datetime import datetime
 
+# Import the specific exception type for secrets
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError
+except ImportError:
+    # Older versions of Streamlit might not have this specific exception
+    StreamlitSecretNotFoundError = Exception
+
 # Export Streamlit secrets as environment variables (before importing other modules)
 # This makes them available to os.getenv() calls in the rest of the codebase
 # In Streamlit Cloud, secrets are available via st.secrets (works like a dict)
-if hasattr(st, 'secrets') and st.secrets:
+# For local testing, secrets may not exist - that's OK, we'll use env vars or local files
+if hasattr(st, 'secrets'):
     try:
+        # Try to access secrets - this may raise StreamlitSecretNotFoundError if no secrets file exists
+        # We need to trigger parsing carefully - check if secrets exist first
+        secrets_dict = st.secrets
         # Access secrets using dictionary-style (standard Streamlit pattern)
-        if 'KALSHI_API_KEY_ID' in st.secrets:
-            os.environ['KALSHI_API_KEY_ID'] = str(st.secrets['KALSHI_API_KEY_ID'])
-        if 'KALSHI_PRIVATE_KEY_PEM' in st.secrets:
-            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(st.secrets['KALSHI_PRIVATE_KEY_PEM'])
-        if 'UNABATED_API_KEY' in st.secrets:
-            os.environ['UNABATED_API_KEY'] = str(st.secrets['UNABATED_API_KEY'])
-    except (KeyError, AttributeError, TypeError) as e:
-        # Log the error but don't fail immediately - might be local dev
-        print(f"Note: Error reading Streamlit secrets: {e}")
-        print("Will attempt to use environment variables or local files instead")
+        if 'KALSHI_API_KEY_ID' in secrets_dict:
+            os.environ['KALSHI_API_KEY_ID'] = str(secrets_dict['KALSHI_API_KEY_ID'])
+        if 'KALSHI_PRIVATE_KEY_PEM' in secrets_dict:
+            os.environ['KALSHI_PRIVATE_KEY_PEM'] = str(secrets_dict['KALSHI_PRIVATE_KEY_PEM'])
+        if 'UNABATED_API_KEY' in secrets_dict:
+            os.environ['UNABATED_API_KEY'] = str(secrets_dict['UNABATED_API_KEY'])
+    except (StreamlitSecretNotFoundError, AttributeError, KeyError, TypeError):
+        # Secrets file doesn't exist or can't be read - this is OK for local testing
+        # Will fall back to environment variables or local files
+        pass
+    except Exception:
+        # Any other error - silently ignore and use fallback methods
+        pass
 
 from orchestrator_moneylines import build_moneylines_rows, build_dashboard_html_moneylines
 
