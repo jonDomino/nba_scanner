@@ -529,27 +529,61 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 """
     
     def format_liq_k(liq: Optional[int]) -> str:
-        """Format liquidity in thousands (K format)."""
+        """Format liquidity in thousands (K format) - CONTRACTS."""
         if liq is None:
             return "N/A"
         if liq >= 1000:
             return f"{liq / 1000:.1f}K"
         return str(liq)
     
-    def calc_liq_bar_pct(liq: Optional[int], max_liq: int) -> str:
-        """Calculate liquidity bar percentage (0-100%)."""
-        if liq is None or max_liq == 0:
+    def format_liq_dollars(price_cents: Optional[int], contracts: Optional[int]) -> str:
+        """
+        Format liquidity as dollar amount at that price level.
+        
+        Formula: (price_cents / 100.0) * contracts = dollar_value
+        Example: 56 cents * 3000 contracts = $1,680
+        
+        Args:
+            price_cents: Price per contract in cents (e.g., 56 for $0.56)
+            contracts: Number of contracts available
+        
+        Returns:
+            Formatted dollar string (e.g., "$1.7K", "$1,680")
+        """
+        if price_cents is None or contracts is None:
+            return "N/A"
+        
+        # Calculate dollar value: (price_cents / 100.0) * contracts
+        dollars = (price_cents / 100.0) * contracts
+        
+        # Format with appropriate scale
+        if dollars >= 1000000:
+            return f"${dollars / 1000000:.2f}M"
+        elif dollars >= 1000:
+            return f"${dollars / 1000:.1f}K"
+        else:
+            return f"${dollars:.0f}"
+    
+    def calc_dollar_liq(price_cents: Optional[int], contracts: Optional[int]) -> Optional[float]:
+        """Calculate dollar liquidity: (price_cents / 100.0) * contracts."""
+        if price_cents is None or contracts is None:
+            return None
+        return (price_cents / 100.0) * contracts
+    
+    def calc_liq_bar_pct(dollar_liq: Optional[float], max_dollar_liq: float) -> str:
+        """Calculate liquidity bar percentage (0-100%) based on dollar amount."""
+        if dollar_liq is None or max_dollar_liq == 0:
             return "0%"
-        pct = min(100, (liq / max_liq) * 100)
+        pct = min(100, (dollar_liq / max_dollar_liq) * 100)
         return f"{pct:.1f}%"
     
-    def calc_liq_gradient(liq: Optional[int], max_liq: int) -> str:
-        """Calculate red-to-green gradient based on liquidity percentage."""
-        if liq is None or max_liq == 0:
+    def calc_liq_gradient(dollar_liq: Optional[float], max_dollar_liq: float) -> str:
+        """Calculate red-to-green gradient based on dollar liquidity percentage."""
+        if dollar_liq is None or max_dollar_liq == 0:
             # No liquidity = red
             return "linear-gradient(to right, #f87171 0%, #f87171 100%)"
         
-        pct = min(100, (liq / max_liq) * 100)
+        pct = min(100, (dollar_liq / max_dollar_liq) * 100)
         
         # Red (low) to green (high) gradient
         # Smooth transition: red -> orange -> yellow -> green
@@ -564,17 +598,17 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             # Yellow to green (66-100%)
             return "linear-gradient(to right, #fbbf24 0%, #4ade80 100%)"
     
-    # Find max liquidity for scaling bars (only from top columns, not +1c columns)
-    max_liq = 0
+    # Find max dollar liquidity for scaling bars (only from top columns, not +1c columns)
+    max_dollar_liq = 0.0
     for row in table_rows:
-        for liq_key in ['away_top_liq', 'home_top_liq']:
-            liq = row.get(liq_key)
-            if liq is not None and isinstance(liq, (int, float)):
-                max_liq = max(max_liq, liq)
+        for liq_key, price_key in [('away_top_liq', 'away_top_price_cents'), ('home_top_liq', 'home_top_price_cents')]:
+            dollar_liq = calc_dollar_liq(row.get(price_key), row.get(liq_key))
+            if dollar_liq is not None:
+                max_dollar_liq = max(max_dollar_liq, dollar_liq)
     
     # If no liquidity found, set default max to avoid division by zero
-    if max_liq == 0:
-        max_liq = 10000  # Default max for scaling
+    if max_dollar_liq == 0:
+        max_dollar_liq = 10000.0  # Default max for scaling ($10,000)
     
     for row in table_rows:
         # Get probability values (used for both display and data attributes)
@@ -590,16 +624,26 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         away_top_str = f"{away_top_val:.4f}" if away_top_val is not None else "N/A"
         home_top_str = f"{home_top_val:.4f}" if home_top_val is not None else "N/A"
         
-        # Format liquidity for tooltips (only for top columns, not +1c)
-        away_top_liq_str = format_liq_k(row.get('away_top_liq'))
-        home_top_liq_str = format_liq_k(row.get('home_top_liq'))
+        # Format liquidity for tooltips in dollars (only for top columns, not +1c)
+        # Calculate dollar value: (price_cents / 100.0) * contracts
+        away_top_liq_str = format_liq_dollars(
+            row.get('away_top_price_cents'),
+            row.get('away_top_liq')
+        )
+        home_top_liq_str = format_liq_dollars(
+            row.get('home_top_price_cents'),
+            row.get('home_top_liq')
+        )
         
-        # Calculate bar percentages and gradients (only for top columns, not +1c)
-        away_top_liq_pct = calc_liq_bar_pct(row.get('away_top_liq'), max_liq)
-        home_top_liq_pct = calc_liq_bar_pct(row.get('home_top_liq'), max_liq)
+        # Calculate dollar liquidity and bar percentages/gradients (only for top columns, not +1c)
+        away_top_dollar_liq = calc_dollar_liq(row.get('away_top_price_cents'), row.get('away_top_liq'))
+        home_top_dollar_liq = calc_dollar_liq(row.get('home_top_price_cents'), row.get('home_top_liq'))
         
-        away_top_liq_gradient = calc_liq_gradient(row.get('away_top_liq'), max_liq)
-        home_top_liq_gradient = calc_liq_gradient(row.get('home_top_liq'), max_liq)
+        away_top_liq_pct = calc_liq_bar_pct(away_top_dollar_liq, max_dollar_liq)
+        home_top_liq_pct = calc_liq_bar_pct(home_top_dollar_liq, max_dollar_liq)
+        
+        away_top_liq_gradient = calc_liq_gradient(away_top_dollar_liq, max_dollar_liq)
+        home_top_liq_gradient = calc_liq_gradient(home_top_dollar_liq, max_dollar_liq)
         
         # Format EVs with color classes
         away_ev_top_val = row['away_ev_top']
@@ -667,18 +711,18 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             <tbody>
 """
         
-        # Find max liquidity for spreads scaling (from both away and home)
-        max_spread_liq = 0
+        # Find max dollar liquidity for spreads scaling (from both away and home)
+        max_spread_dollar_liq = 0.0
         for row in spread_rows:
-            away_liq = row.get('away_kalshi_liq')
-            home_liq = row.get('home_kalshi_liq')
-            if away_liq is not None and isinstance(away_liq, (int, float)):
-                max_spread_liq = max(max_spread_liq, away_liq)
-            if home_liq is not None and isinstance(home_liq, (int, float)):
-                max_spread_liq = max(max_spread_liq, home_liq)
+            away_dollar_liq = calc_dollar_liq(row.get('away_kalshi_price_cents'), row.get('away_kalshi_liq'))
+            home_dollar_liq = calc_dollar_liq(row.get('home_kalshi_price_cents'), row.get('home_kalshi_liq'))
+            if away_dollar_liq is not None:
+                max_spread_dollar_liq = max(max_spread_dollar_liq, away_dollar_liq)
+            if home_dollar_liq is not None:
+                max_spread_dollar_liq = max(max_spread_dollar_liq, home_dollar_liq)
         
-        if max_spread_liq == 0:
-            max_spread_liq = 10000
+        if max_spread_dollar_liq == 0:
+            max_spread_dollar_liq = 10000.0  # Default max for scaling ($10,000)
         
         # Sort spreads by ROTO
         spread_rows_sorted = sorted(spread_rows, key=lambda x: (
@@ -712,15 +756,24 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             away_kalshi_str = f"{away_kalshi_val:.4f}" if away_kalshi_val is not None else "N/A"
             home_kalshi_str = f"{home_kalshi_val:.4f}" if home_kalshi_val is not None else "N/A"
             
-            # Format liquidity
-            away_kalshi_liq_str = format_liq_k(away_kalshi_liq)
-            home_kalshi_liq_str = format_liq_k(home_kalshi_liq)
+            # Format liquidity in dollars: (price_cents / 100.0) * contracts
+            away_kalshi_liq_str = format_liq_dollars(
+                row.get('away_kalshi_price_cents'),
+                away_kalshi_liq
+            )
+            home_kalshi_liq_str = format_liq_dollars(
+                row.get('home_kalshi_price_cents'),
+                home_kalshi_liq
+            )
             
-            # Calculate bar percentages and gradients
-            away_kalshi_liq_pct = calc_liq_bar_pct(away_kalshi_liq, max_spread_liq)
-            home_kalshi_liq_pct = calc_liq_bar_pct(home_kalshi_liq, max_spread_liq)
-            away_kalshi_liq_gradient = calc_liq_gradient(away_kalshi_liq, max_spread_liq)
-            home_kalshi_liq_gradient = calc_liq_gradient(home_kalshi_liq, max_spread_liq)
+            # Calculate dollar liquidity and bar percentages/gradients
+            away_kalshi_dollar_liq = calc_dollar_liq(row.get('away_kalshi_price_cents'), away_kalshi_liq)
+            home_kalshi_dollar_liq = calc_dollar_liq(row.get('home_kalshi_price_cents'), home_kalshi_liq)
+            
+            away_kalshi_liq_pct = calc_liq_bar_pct(away_kalshi_dollar_liq, max_spread_dollar_liq)
+            home_kalshi_liq_pct = calc_liq_bar_pct(home_kalshi_dollar_liq, max_spread_dollar_liq)
+            away_kalshi_liq_gradient = calc_liq_gradient(away_kalshi_dollar_liq, max_spread_dollar_liq)
+            home_kalshi_liq_gradient = calc_liq_gradient(home_kalshi_dollar_liq, max_spread_dollar_liq)
             
             html_content += f"""
                 <tr class="{row_class}">
@@ -784,18 +837,18 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             <tbody>
 """
         
-        # Find max liquidity for totals scaling (from both over and under)
-        max_totals_liq = 0
+        # Find max dollar liquidity for totals scaling (from both over and under)
+        max_totals_dollar_liq = 0.0
         for row in totals_rows:
-            over_liq = row.get('over_kalshi_liq')
-            under_liq = row.get('under_kalshi_liq')
-            if over_liq is not None and isinstance(over_liq, (int, float)):
-                max_totals_liq = max(max_totals_liq, over_liq)
-            if under_liq is not None and isinstance(under_liq, (int, float)):
-                max_totals_liq = max(max_totals_liq, under_liq)
+            over_dollar_liq = calc_dollar_liq(row.get('over_kalshi_price_cents'), row.get('over_kalshi_liq'))
+            under_dollar_liq = calc_dollar_liq(row.get('under_kalshi_price_cents'), row.get('under_kalshi_liq'))
+            if over_dollar_liq is not None:
+                max_totals_dollar_liq = max(max_totals_dollar_liq, over_dollar_liq)
+            if under_dollar_liq is not None:
+                max_totals_dollar_liq = max(max_totals_dollar_liq, under_dollar_liq)
         
-        if max_totals_liq == 0:
-            max_totals_liq = 10000
+        if max_totals_dollar_liq == 0:
+            max_totals_dollar_liq = 10000.0  # Default max for scaling ($10,000)
         
         # Sort totals by ROTO
         totals_rows_sorted = sorted(totals_rows, key=lambda x: (
@@ -829,15 +882,24 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             over_kalshi_str = f"{over_kalshi_val:.4f}" if over_kalshi_val is not None else "N/A"
             under_kalshi_str = f"{under_kalshi_val:.4f}" if under_kalshi_val is not None else "N/A"
             
-            # Format liquidity
-            over_kalshi_liq_str = format_liq_k(over_kalshi_liq)
-            under_kalshi_liq_str = format_liq_k(under_kalshi_liq)
+            # Format liquidity in dollars: (price_cents / 100.0) * contracts
+            over_kalshi_liq_str = format_liq_dollars(
+                row.get('over_kalshi_price_cents'),
+                over_kalshi_liq
+            )
+            under_kalshi_liq_str = format_liq_dollars(
+                row.get('under_kalshi_price_cents'),
+                under_kalshi_liq
+            )
             
-            # Calculate bar percentages and gradients
-            over_kalshi_liq_pct = calc_liq_bar_pct(over_kalshi_liq, max_totals_liq)
-            under_kalshi_liq_pct = calc_liq_bar_pct(under_kalshi_liq, max_totals_liq)
-            over_kalshi_liq_gradient = calc_liq_gradient(over_kalshi_liq, max_totals_liq)
-            under_kalshi_liq_gradient = calc_liq_gradient(under_kalshi_liq, max_totals_liq)
+            # Calculate dollar liquidity and bar percentages/gradients
+            over_kalshi_dollar_liq = calc_dollar_liq(row.get('over_kalshi_price_cents'), over_kalshi_liq)
+            under_kalshi_dollar_liq = calc_dollar_liq(row.get('under_kalshi_price_cents'), under_kalshi_liq)
+            
+            over_kalshi_liq_pct = calc_liq_bar_pct(over_kalshi_dollar_liq, max_totals_dollar_liq)
+            under_kalshi_liq_pct = calc_liq_bar_pct(under_kalshi_dollar_liq, max_totals_dollar_liq)
+            over_kalshi_liq_gradient = calc_liq_gradient(over_kalshi_dollar_liq, max_totals_dollar_liq)
+            under_kalshi_liq_gradient = calc_liq_gradient(under_kalshi_dollar_liq, max_totals_dollar_liq)
             
             html_content += f"""
                 <tr class="{row_class}">
@@ -1024,6 +1086,10 @@ def main():
         yes_bid_top_liq_home = prob_data.get("yes_bid_top_liq_home") if prob_data else None
         yes_bid_top_p1_liq_home = prob_data.get("yes_bid_top_p1_liq_home") if prob_data else None
         
+        # YES bid prices in cents (needed for dollar liquidity calculation)
+        yes_bid_top_c_away = prob_data.get("yes_bid_top_c_away") if prob_data else None
+        yes_bid_top_c_home = prob_data.get("yes_bid_top_c_home") if prob_data else None
+        
         # Compute EVs (buyer/YES exposure perspective)
         # EV = (Unabated fair win prob - Kalshi break-even cost) * 100
         # Positive EV means fair > cost, so buying YES is profitable
@@ -1054,6 +1120,8 @@ def main():
             "away_topm1_liq": yes_bid_top_p1_liq_away,
             "home_top_liq": yes_bid_top_liq_home,
             "home_topm1_liq": yes_bid_top_p1_liq_home,
+            "away_top_price_cents": yes_bid_top_c_away,  # Price in cents for dollar liquidity calc
+            "home_top_price_cents": yes_bid_top_c_home,  # Price in cents for dollar liquidity calc
             "away_ev_top": away_ev_top,
             "away_ev_topm1": away_ev_topm1,
             "home_ev_top": home_ev_top,

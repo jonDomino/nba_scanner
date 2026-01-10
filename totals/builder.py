@@ -834,8 +834,10 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
             
             over_kalshi_prob = over_orderbook_data.get("tob_effective_prob")
             over_kalshi_liq = over_orderbook_data.get("tob_liq")
+            over_kalshi_price_cents = over_orderbook_data.get("tob_bid_cents")  # YES bid price in cents
             under_kalshi_prob = under_orderbook_data.get("tob_effective_prob")
             under_kalshi_liq = under_orderbook_data.get("tob_liq")
+            under_kalshi_price_cents = under_orderbook_data.get("tob_bid_cents")  # NO bid price in cents
             
             # Format strike string (always "Over X.Y")
             strike_str = format_total_strike_string(strike_value)
@@ -869,8 +871,10 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
                 "unabated_total": canonical_total,
                 "over_kalshi_prob": over_kalshi_prob,
                 "over_kalshi_liq": over_kalshi_liq,
+                "over_kalshi_price_cents": over_kalshi_price_cents,  # YES bid price in cents for dollar liquidity calc
                 "under_kalshi_prob": under_kalshi_prob,
                 "under_kalshi_liq": under_kalshi_liq,
+                "under_kalshi_price_cents": under_kalshi_price_cents,  # NO bid price in cents for dollar liquidity calc
                 # Placeholders for future implementation
                 "over_fair": None,
                 "under_fair": None,

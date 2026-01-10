@@ -105,11 +105,16 @@ def build_moneylines_rows(debug: bool = False) -> List[Dict[str, Any]]:
         yes_be_top_home = prob_data.get("yes_be_top_home") if prob_data else None
         yes_be_topm1_home = prob_data.get("yes_be_topm1_home") if prob_data else None
         
-        # Internal: YES bid liquidity (from orderbook["yes"] bids, maker prices)
+        # Internal: YES-equivalent liquidity (from NO bids on opposite market, converted to YES prices)
+        # Away: NO bids from Home market; Home: NO bids from Away market
         yes_bid_top_liq_away = prob_data.get("yes_bid_top_liq_away") if prob_data else None
         yes_bid_top_p1_liq_away = prob_data.get("yes_bid_top_p1_liq_away") if prob_data else None
         yes_bid_top_liq_home = prob_data.get("yes_bid_top_liq_home") if prob_data else None
         yes_bid_top_p1_liq_home = prob_data.get("yes_bid_top_p1_liq_home") if prob_data else None
+        
+        # YES bid prices in cents (needed for dollar liquidity calculation)
+        yes_bid_top_c_away = prob_data.get("yes_bid_top_c_away") if prob_data else None
+        yes_bid_top_c_home = prob_data.get("yes_bid_top_c_home") if prob_data else None
         
         # Compute EVs (buyer/YES exposure perspective)
         away_fair = game.get("away_fair")
@@ -139,6 +144,8 @@ def build_moneylines_rows(debug: bool = False) -> List[Dict[str, Any]]:
             "away_topm1_liq": yes_bid_top_p1_liq_away,
             "home_top_liq": yes_bid_top_liq_home,
             "home_topm1_liq": yes_bid_top_p1_liq_home,
+            "away_top_price_cents": yes_bid_top_c_away,  # Price in cents for dollar liquidity calc
+            "home_top_price_cents": yes_bid_top_c_home,  # Price in cents for dollar liquidity calc
             "away_ev_top": away_ev_top,
             "away_ev_topm1": away_ev_topm1,
             "home_ev_top": home_ev_top,

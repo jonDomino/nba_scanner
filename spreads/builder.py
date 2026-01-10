@@ -1029,13 +1029,17 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
             if canonical_team == "away":
                 away_kalshi_prob = canonical_orderbook_data.get("tob_effective_prob")
                 away_kalshi_liq = canonical_orderbook_data.get("tob_liq")
+                away_kalshi_price_cents = canonical_orderbook_data.get("tob_bid_cents")
                 home_kalshi_prob = opponent_orderbook_data.get("tob_effective_prob")
                 home_kalshi_liq = opponent_orderbook_data.get("tob_liq")
+                home_kalshi_price_cents = opponent_orderbook_data.get("tob_bid_cents")
             else:
                 away_kalshi_prob = opponent_orderbook_data.get("tob_effective_prob")
                 away_kalshi_liq = opponent_orderbook_data.get("tob_liq")
+                away_kalshi_price_cents = opponent_orderbook_data.get("tob_bid_cents")
                 home_kalshi_prob = canonical_orderbook_data.get("tob_effective_prob")
                 home_kalshi_liq = canonical_orderbook_data.get("tob_liq")
+                home_kalshi_price_cents = canonical_orderbook_data.get("tob_bid_cents")
             
             # Format strike string (canonical team's perspective)
             if canonical_spread < 0:
@@ -1075,8 +1079,10 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
                 "unabated_spread": canonical_spread,
                 "away_kalshi_prob": away_kalshi_prob,
                 "away_kalshi_liq": away_kalshi_liq,
+                "away_kalshi_price_cents": away_kalshi_price_cents,  # Price in cents for dollar liquidity calc
                 "home_kalshi_prob": home_kalshi_prob,
                 "home_kalshi_liq": home_kalshi_liq,
+                "home_kalshi_price_cents": home_kalshi_price_cents,  # Price in cents for dollar liquidity calc
             })
     
     return spread_rows
