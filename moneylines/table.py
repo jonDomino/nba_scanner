@@ -827,12 +827,28 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             x.get('game_date') or ''
         ))
         
+        # Track previous game to detect duplicates
+        prev_game_key = None
+        
         for row in spread_rows_sorted:
             # Format game time and check if started
             event_start = row.get('event_start')
             game_time_str = format_game_time_pst(event_start)
             is_started = is_game_started(event_start)
             row_class = "game-started" if is_started else ""
+            
+            # Create game key to detect duplicate rows (same game, different strikes)
+            game_key = (
+                row.get('game_date'),
+                row.get('away_team'),
+                row.get('home_team'),
+                row.get('away_roto'),
+                row.get('consensus')
+            )
+            
+            # Determine if this is a duplicate row (same game as previous)
+            is_duplicate = (game_key == prev_game_key)
+            prev_game_key = game_key
             
             # Format ROTO
             away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
@@ -871,14 +887,22 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             away_kalshi_liq_gradient = calc_liq_gradient(away_kalshi_dollar_liq, max_spread_dollar_liq)
             home_kalshi_liq_gradient = calc_liq_gradient(home_kalshi_dollar_liq, max_spread_dollar_liq)
             
+            # For duplicate rows, leave game metadata cells empty
+            game_date_cell = row['game_date'] if not is_duplicate else ""
+            game_time_cell = game_time_str if not is_duplicate else ""
+            roto_cell = away_roto_str if not is_duplicate else ""
+            away_team_cell = row['away_team'] if not is_duplicate else ""
+            home_team_cell = row['home_team'] if not is_duplicate else ""
+            consensus_cell = consensus_str if not is_duplicate else ""
+            
             html_content += f"""
                 <tr class="{row_class}">
-                    <td class="date-cell">{row['game_date']}</td>
-                    <td class="date-cell">{game_time_str}</td>
-                    <td class="prob-value">{away_roto_str}</td>
-                    <td class="team-name">{row['away_team']}</td>
-                    <td class="team-name">{row['home_team']}</td>
-                    <td class="team-name">{consensus_str}</td>
+                    <td class="date-cell">{game_date_cell}</td>
+                    <td class="date-cell">{game_time_cell}</td>
+                    <td class="prob-value">{roto_cell}</td>
+                    <td class="team-name">{away_team_cell}</td>
+                    <td class="team-name">{home_team_cell}</td>
+                    <td class="team-name">{consensus_cell}</td>
                     <td class="team-name">{strike_str}</td>
 """
             
@@ -960,12 +984,28 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             x.get('game_date') or ''
         ))
         
+        # Track previous game to detect duplicates
+        prev_game_key = None
+        
         for row in totals_rows_sorted:
             # Format game time and check if started
             event_start = row.get('event_start')
             game_time_str = format_game_time_pst(event_start)
             is_started = is_game_started(event_start)
             row_class = "game-started" if is_started else ""
+            
+            # Create game key to detect duplicate rows (same game, different strikes)
+            game_key = (
+                row.get('game_date'),
+                row.get('away_team'),
+                row.get('home_team'),
+                row.get('away_roto'),
+                row.get('consensus')
+            )
+            
+            # Determine if this is a duplicate row (same game as previous)
+            is_duplicate = (game_key == prev_game_key)
+            prev_game_key = game_key
             
             # Format ROTO
             away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
@@ -1004,14 +1044,22 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             over_kalshi_liq_gradient = calc_liq_gradient(over_kalshi_dollar_liq, max_totals_dollar_liq)
             under_kalshi_liq_gradient = calc_liq_gradient(under_kalshi_dollar_liq, max_totals_dollar_liq)
             
+            # For duplicate rows, leave game metadata cells empty
+            game_date_cell = row['game_date'] if not is_duplicate else ""
+            game_time_cell = game_time_str if not is_duplicate else ""
+            roto_cell = away_roto_str if not is_duplicate else ""
+            away_team_cell = row['away_team'] if not is_duplicate else ""
+            home_team_cell = row['home_team'] if not is_duplicate else ""
+            consensus_cell = consensus_str if not is_duplicate else ""
+            
             html_content += f"""
                 <tr class="{row_class}">
-                    <td class="date-cell">{row['game_date']}</td>
-                    <td class="date-cell">{game_time_str}</td>
-                    <td class="prob-value">{away_roto_str}</td>
-                    <td class="team-name">{row['away_team']}</td>
-                    <td class="team-name">{row['home_team']}</td>
-                    <td class="team-name">{consensus_str}</td>
+                    <td class="date-cell">{game_date_cell}</td>
+                    <td class="date-cell">{game_time_cell}</td>
+                    <td class="prob-value">{roto_cell}</td>
+                    <td class="team-name">{away_team_cell}</td>
+                    <td class="team-name">{home_team_cell}</td>
+                    <td class="team-name">{consensus_cell}</td>
                     <td class="team-name">{strike_str}</td>
 """
             

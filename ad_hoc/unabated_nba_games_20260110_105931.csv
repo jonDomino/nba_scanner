@@ -1,0 +1,7 @@
+game_date,game_time,away_team,home_team,away_roto,home_roto,away_ml_prob,away_ml_decimal,away_ml_american,home_ml_prob,home_ml_decimal,home_ml_american,away_spread,away_spread_juice,home_spread,home_spread_juice,total,over_juice,under_juice
+2026-01-10,10:00,Cleveland Cavaliers,Minnesota Timberwolves,502,501,0.5763,1.7352,-136,0.4237,2.3602,136,-3.0,104,3.0,-104,242.5,-113,-113
+2026-01-10,16:00,Indiana Pacers,Miami Heat,504,503,0.3003,3.33,233,0.6997,1.4292,-233,7.0,-104,-7.0,104,235.0,103,103
+2026-01-10,16:30,Detroit Pistons,LA Clippers,506,505,0.6,1.6667,-150,0.4,2.5,150,-4.5,106,4.5,-106,213.5,102,102
+2026-01-10,17:00,Boston Celtics,San Antonio Spurs,510,509,0.4854,2.0602,106,0.5146,1.9433,-106,1.0,101,-1.0,-101,230.0,107,107
+2026-01-10,17:00,Chicago Bulls,Dallas Mavericks,508,507,0.5671,1.7634,-131,0.4329,2.31,131,-2.5,102,2.5,-102,233.0,105,105
+2026-01-10,18:30,Utah Jazz,Charlotte Hornets,512,511,0.3584,2.7902,179,0.6416,1.5586,-179,5.0,103,-5.0,-103,239.5,-104,-104
