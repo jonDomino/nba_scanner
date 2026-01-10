@@ -51,7 +51,7 @@ if hasattr(st, 'secrets'):
         import sys
         print(f"Note: Error reading Streamlit secrets: {type(e).__name__}: {e}", file=sys.stderr)
 
-from orchestrator_moneylines import build_moneylines_rows, build_dashboard_html_moneylines
+from orchestrator import build_all_rows, build_dashboard_html_all
 
 # Configure Streamlit page
 st.set_page_config(
@@ -68,17 +68,17 @@ def get_cached_dashboard():
     Build and cache the dashboard HTML.
     
     Returns:
-        Tuple of (moneyline_rows, html_string, timestamp)
+        Tuple of (moneyline_rows, spread_rows, totals_rows, html_string, timestamp)
     """
     try:
-        rows = build_moneylines_rows(debug=False)
-        html = build_dashboard_html_moneylines(rows)
+        moneyline_rows, spread_rows, totals_rows = build_all_rows(debug=False)
+        html = build_dashboard_html_all(moneyline_rows, spread_rows, totals_rows)
         timestamp = datetime.now()
-        return rows, html, timestamp
+        return moneyline_rows, spread_rows, totals_rows, html, timestamp
     except Exception as e:
         st.error(f"Error building dashboard: {e}")
         st.stop()
-        return None, None, None
+        return None, None, None, None, None
 
 
 def main():
@@ -133,9 +133,9 @@ def main():
         st.caption("Click 'Refresh Now' to force immediate refresh.")
     
     # Get cached data
-    rows, html, timestamp = get_cached_dashboard()
+    moneyline_rows, spread_rows, totals_rows, html, timestamp = get_cached_dashboard()
     
-    if rows is None or html is None:
+    if moneyline_rows is None or html is None:
         st.error("Failed to load dashboard data.")
         return
     
@@ -144,7 +144,7 @@ def main():
         st.caption(f"Last updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} PST")
     
     # Display game count
-    st.info(f"Showing {len(rows)} game(s) for today")
+    st.info(f"Showing {len(moneyline_rows)} moneyline game(s), {len(spread_rows) if spread_rows else 0} spread row(s), {len(totals_rows) if totals_rows else 0} totals row(s)")
     
     # Embed HTML dashboard
     # Use height=1200 for comfortable viewing, scrolling enabled

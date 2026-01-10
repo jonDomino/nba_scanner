@@ -14,7 +14,6 @@ except ImportError:
 
 from core.reusable_functions import fetch_unabated_snapshot
 from utils import config
-from pricing.conversion import american_to_cents
 
 
 def utc_to_la_datetime(utc_timestamp: str) -> datetime:
@@ -135,15 +134,23 @@ def extract_unabated_moneylines_by_team_id(
         # Convert to int safely (handle strings like " -150 " or "+130")
         try:
             if isinstance(price_raw, str):
-                price = int(price_raw.strip())
+                american_odds = int(price_raw.strip())
             else:
-                price = int(price_raw)
+                american_odds = int(price_raw)
         except (ValueError, TypeError):
             continue
         
-        # Convert to probability and store by team_id
-        cents = american_to_cents(price)
-        prob = cents / 100.0  # Convert to probability (0-1)
+        # Convert American odds directly to probability with full precision
+        # Then round to 4 decimal places as requested
+        if american_odds < 0:
+            # Favorite: p = (-odds) / ((-odds) + 100)
+            prob = (-american_odds) / ((-american_odds) + 100.0)
+        else:
+            # Underdog: p = 100 / (odds + 100)
+            prob = 100.0 / (american_odds + 100.0)
+        
+        # Round to 4 decimal places
+        prob = round(prob, 4)
         prices_by_team_id[team_id] = prob
     
     return prices_by_team_id

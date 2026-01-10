@@ -19,6 +19,7 @@ User-facing: Display "price to get exposure to Over/Under X.Y".
 
 import re
 from typing import Dict, Any, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 from data_build.unabated_callsheet import get_team_name
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
@@ -26,7 +27,7 @@ from core.reusable_functions import (
     fetch_kalshi_markets_for_event,
     load_team_xref
 )
-from spreads.builder import get_spread_orderbook_data
+from spreads.builder import get_spread_orderbook_data, _fetch_orderbook_with_cache
 from utils import config
 from utils.kalshi_api import load_creds
 
@@ -658,9 +659,13 @@ def format_total_consensus_string(
         return total_str
 
 
-def build_totals_rows_for_today() -> List[Dict[str, Any]]:
+def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, snapshot: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Build totals rows for today's NBA games.
+    
+    Args:
+        games: Optional pre-fetched games list (if None, will fetch internally)
+        snapshot: Optional pre-fetched Unabated snapshot (if None, will fetch internally)
     
     Returns:
         List of totals row dicts, each with:
@@ -672,8 +677,9 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
         - under_kalshi_prob: NO bid break-even prob (after fees)
         - under_kalshi_liq: NO bid liquidity
     """
-    # Get today's games with all metadata
-    games = get_today_games_with_fairs_and_kalshi_tickers()
+    # Get today's games with all metadata (use provided or fetch)
+    if games is None:
+        games = get_today_games_with_fairs_and_kalshi_tickers()
     
     if not games:
         if DEBUG_TOTALS:
@@ -688,9 +694,10 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
             print(f"❌ Failed to load Kalshi credentials: {e}")
         return []
     
-    # Get Unabated snapshot for totals extraction
-    from core.reusable_functions import fetch_unabated_snapshot
-    snapshot = fetch_unabated_snapshot()
+    # Get Unabated snapshot for totals extraction (use provided or fetch)
+    if snapshot is None:
+        from core.reusable_functions import fetch_unabated_snapshot
+        snapshot = fetch_unabated_snapshot()
     teams_dict = snapshot.get("teams", {})
     
     # Get today's games
@@ -816,6 +823,31 @@ def build_totals_rows_for_today() -> List[Dict[str, Any]]:
         
         if not selected_strikes:
             continue
+        
+        # Collect all unique market tickers we need to fetch
+        unique_market_tickers = set()
+        for market in selected_strikes:
+            market_ticker = market.get("ticker")
+            if market_ticker:
+                unique_market_tickers.add(market_ticker)
+        
+        # Pre-fetch all orderbooks in parallel (if we have multiple tickers)
+        if len(unique_market_tickers) > 1:
+            try:
+                api_key_id, private_key_pem = load_creds()
+                with ThreadPoolExecutor(max_workers=min(len(unique_market_tickers), 10)) as executor:
+                    future_to_ticker = {
+                        executor.submit(_fetch_orderbook_with_cache, ticker, api_key_id, private_key_pem): ticker
+                        for ticker in unique_market_tickers
+                    }
+                    # Wait for all to complete (results are cached)
+                    for future in future_to_ticker:
+                        try:
+                            future.result()
+                        except Exception:
+                            pass  # Error handling done in fetch function
+            except Exception:
+                pass  # Fall back to sequential fetching if parallel fails
         
         # Build rows for canonical POV only (Over perspective)
         for market in selected_strikes:

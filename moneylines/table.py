@@ -196,15 +196,43 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             padding-bottom: 15px;
         }
         
+        .table-section {
+            margin-top: 40px;
+            position: relative;
+        }
+        
+        .table-header {
+            position: relative;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #333;
+        }
+        
         h2 {
             color: #ffffff;
-            margin-top: 40px;
-            margin-bottom: 15px;
+            margin: 0;
             font-size: 20px;
             font-weight: 600;
             text-align: center;
-            border-bottom: 2px solid #333;
-            padding-bottom: 10px;
+        }
+        
+        .table-toggle-button {
+            position: absolute;
+            top: 0;
+            left: 0;
+            padding: 6px 12px;
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        
+        .table-toggle-button:hover {
+            background-color: #333;
         }
         
         .toggle-button {
@@ -224,6 +252,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         
         .toggle-button:hover {
             background-color: #333;
+        }
+        
+        .table-container {
+            display: block;
+        }
+        
+        .table-container.hidden {
+            display: none;
         }
         
         table {
@@ -501,6 +537,44 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                 }
             });
         }
+        
+        function toggleTable(tableName) {
+            const tableContainer = document.getElementById(tableName + 'Table');
+            const toggleBtn = document.getElementById(tableName + 'ToggleBtn');
+            
+            if (tableContainer.classList.contains('hidden')) {
+                tableContainer.classList.remove('hidden');
+                toggleBtn.textContent = 'Hide';
+            } else {
+                tableContainer.classList.add('hidden');
+                toggleBtn.textContent = 'Show';
+            }
+        }
+        
+        // Set default visibility: moneylines visible, spreads and totals hidden
+        document.addEventListener('DOMContentLoaded', function() {
+            // Moneylines: visible by default (no action needed)
+            
+            // Spreads: hidden by default
+            const spreadsTable = document.getElementById('spreadsTable');
+            if (spreadsTable) {
+                spreadsTable.classList.add('hidden');
+                const spreadsBtn = document.getElementById('spreadsToggleBtn');
+                if (spreadsBtn) {
+                    spreadsBtn.textContent = 'Show';
+                }
+            }
+            
+            // Totals: hidden by default
+            const totalsTable = document.getElementById('totalsTable');
+            if (totalsTable) {
+                totalsTable.classList.add('hidden');
+                const totalsBtn = document.getElementById('totalsToggleBtn');
+                if (totalsBtn) {
+                    totalsBtn.textContent = 'Show';
+                }
+            }
+        });
     </script>
 </head>
 <body>
@@ -509,7 +583,13 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             <h1>NBA VALUE DASHBOARD</h1>
             <button class="toggle-button" id="oddsToggleBtn" onclick="toggleOddsFormat()">Change odds type</button>
         </div>
-        <table>
+        <div class="table-section">
+            <div class="table-header">
+                <button class="table-toggle-button" id="moneylinesToggleBtn" onclick="toggleTable('moneylines')">Hide</button>
+                <h2>MONEYLINES</h2>
+            </div>
+            <div class="table-container" id="moneylinesTable">
+            <table>
             <thead>
                 <tr>
                     <th>Game Date</th>
@@ -697,13 +777,20 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
     html_content += """
             </tbody>
         </table>
+        </div>
+        </div>
 """
     
     # Add spreads table if provided
     if spread_rows:
         html_content += """
-        <h2>SPREADS</h2>
-        <table>
+        <div class="table-section">
+            <div class="table-header">
+                <button class="table-toggle-button" id="spreadsToggleBtn" onclick="toggleTable('spreads')">Hide</button>
+                <h2>SPREADS [BETA - DATA NOT VALIDATED]</h2>
+            </div>
+            <div class="table-container hidden" id="spreadsTable">
+            <table>
             <thead>
                 <tr>
                     <th>Game Date</th>
@@ -823,13 +910,20 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         html_content += """
             </tbody>
         </table>
+            </div>
+        </div>
 """
     
     # Add totals table if provided (after spreads, or after moneylines if no spreads)
     if totals_rows:
         html_content += """
-        <h2>TOTALS</h2>
-        <table>
+        <div class="table-section">
+            <div class="table-header">
+                <button class="table-toggle-button" id="totalsToggleBtn" onclick="toggleTable('totals')">Hide</button>
+                <h2>TOTALS [BETA - DATA NOT VALIDATED]</h2>
+            </div>
+            <div class="table-container hidden" id="totalsTable">
+            <table>
             <thead>
                 <tr>
                     <th>Game Date</th>
@@ -949,6 +1043,8 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         html_content += """
             </tbody>
         </table>
+            </div>
+        </div>
 """
     
     html_content += """

@@ -17,6 +17,7 @@ User-facing: Display "price to get exposure to Team X covering/winning by over Y
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
 
 from data_build.unabated_callsheet import get_today_games_with_fairs, utc_to_la_datetime, get_team_name
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
@@ -563,13 +564,30 @@ def get_no_bid_top_and_liquidity(orderbook: Dict[str, Any]) -> Tuple[Optional[in
     return (no_bid_top_c, no_bid_top_liq, no_bids_by_price)
 
 
-def get_spread_orderbook_data(market_ticker: str, side_to_trade: str = "YES") -> Dict[str, Any]:
+# Cache for orderbooks (key: market_ticker, value: orderbook dict)
+_orderbook_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _fetch_orderbook_with_cache(market_ticker: str, api_key_id: str, private_key_pem: str) -> Dict[str, Any]:
+    """Fetch orderbook with caching to avoid duplicate API calls for same ticker."""
+    market_ticker = market_ticker.strip().upper()
+    
+    if market_ticker in _orderbook_cache:
+        return _orderbook_cache[market_ticker]
+    
+    orderbook = fetch_orderbook(api_key_id, private_key_pem, market_ticker)
+    _orderbook_cache[market_ticker] = orderbook or {}
+    return orderbook or {}
+
+
+def get_spread_orderbook_data(market_ticker: str, side_to_trade: str = "YES", orderbook: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Fetch orderbook and compute TOB for a specific side (YES or NO) of a spread market.
     
     Args:
         market_ticker: Kalshi market ticker
         side_to_trade: "YES" or "NO" - which side's bids to extract
+        orderbook: Optional pre-fetched orderbook (if provided, skips API call)
     
     Returns:
         Dict with keys:
@@ -596,7 +614,9 @@ def get_spread_orderbook_data(market_ticker: str, side_to_trade: str = "YES") ->
             "error": f"Failed to load credentials: {e}"
         }
     
-    orderbook = fetch_orderbook(api_key_id, private_key_pem, market_ticker)
+    # Use provided orderbook or fetch (with caching)
+    if orderbook is None:
+        orderbook = _fetch_orderbook_with_cache(market_ticker, api_key_id, private_key_pem)
     
     if not orderbook:
         return {
@@ -728,9 +748,13 @@ def format_consensus_string(
         return f"{team_code} {spread_str}"
 
 
-def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
+def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, snapshot: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Build spreads rows for today's NBA games.
+    
+    Args:
+        games: Optional pre-fetched games list (if None, will fetch internally)
+        snapshot: Optional pre-fetched Unabated snapshot (if None, will fetch internally)
     
     Returns:
         List of spread row dicts, each with:
@@ -746,8 +770,9 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
         - tob_p1_liq: Top-of-book+1c liquidity (None if theoretical)
         - crossed: Boolean if +1c would cross
     """
-    # Get today's games with all metadata
-    games = get_today_games_with_fairs_and_kalshi_tickers()
+    # Get today's games with all metadata (use provided or fetch)
+    if games is None:
+        games = get_today_games_with_fairs_and_kalshi_tickers()
     
     if not games:
         if DEBUG_SPREADS:
@@ -766,9 +791,10 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
             print(f"❌ Failed to load Kalshi credentials: {e}")
         return []
     
-    # Get Unabated snapshot for spread extraction
-    from core.reusable_functions import fetch_unabated_snapshot
-    snapshot = fetch_unabated_snapshot()
+    # Get Unabated snapshot for spread extraction (use provided or fetch)
+    if snapshot is None:
+        from core.reusable_functions import fetch_unabated_snapshot
+        snapshot = fetch_unabated_snapshot()
     teams_dict = snapshot.get("teams", {})
     
     # Get today's games with spreads
@@ -984,6 +1010,31 @@ def build_spreads_rows_for_today() -> List[Dict[str, Any]]:
         
         if not selected_strikes:
             continue
+        
+        # Collect all unique market tickers we need to fetch
+        unique_market_tickers = set()
+        for market, side_to_trade_canonical in selected_strikes:
+            market_ticker = market.get("ticker")
+            if market_ticker:
+                unique_market_tickers.add(market_ticker)
+        
+        # Pre-fetch all orderbooks in parallel (if we have multiple tickers)
+        if len(unique_market_tickers) > 1:
+            try:
+                api_key_id, private_key_pem = load_creds()
+                with ThreadPoolExecutor(max_workers=min(len(unique_market_tickers), 10)) as executor:
+                    future_to_ticker = {
+                        executor.submit(_fetch_orderbook_with_cache, ticker, api_key_id, private_key_pem): ticker
+                        for ticker in unique_market_tickers
+                    }
+                    # Wait for all to complete (results are cached)
+                    for future in future_to_ticker:
+                        try:
+                            future.result()
+                        except Exception:
+                            pass  # Error handling done in fetch function
+            except Exception:
+                pass  # Fall back to sequential fetching if parallel fails
         
         # Build rows for canonical POV only (not for both away and home)
         for market, side_to_trade_canonical in selected_strikes:

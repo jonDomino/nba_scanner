@@ -3,7 +3,9 @@ Main orchestrator: coordinates data fetching and table building.
 This is the root entry point that replaces nba_value_table.py main().
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 # Import data fetching modules
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
@@ -14,19 +16,41 @@ from spreads.builder import build_spreads_rows_for_today
 from totals.builder import build_totals_rows_for_today
 
 # Import dashboard renderer
-from dashboard_html import render_dashboard, open_dashboard_in_browser
+from dashboard_html import render_dashboard_html, open_dashboard_in_browser
 
 
-def main():
-    """Main entry point - orchestrates data fetching and table building."""
-    # Step 1: Get today's games with fairs and Kalshi tickers
-    games = get_today_games_with_fairs_and_kalshi_tickers()
+def derive_event_ticker(market_ticker: str) -> Optional[str]:
+    """
+    Derive event ticker from market ticker by removing final -TEAM suffix.
     
-    if not games:
-        print("No NBA games found for today")
-        return
+    Example: KXNBAGAME-26JAN09TORBOS-TOR -> KXNBAGAME-26JAN09TORBOS
     
-    # Step 2: Get top-of-book maker break-even probs for each event
+    Args:
+        market_ticker: Market ticker string (e.g., "KXNBAGAME-26JAN09TORBOS-TOR")
+    
+    Returns:
+        Event ticker string or None if parsing fails
+    """
+    if not market_ticker:
+        return None
+    parts = market_ticker.split("-")
+    if len(parts) >= 3:
+        return "-".join(parts[:-1])
+    return None
+
+
+def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> List[Dict[str, Any]]:
+    """
+    Build moneylines table rows from games and fetched orderbook data.
+    
+    Args:
+        games: Pre-fetched games list
+        debug: If True, print debug information
+    
+    Returns:
+        List of moneyline row dicts
+    """
+    # Get top-of-book maker break-even probs for each event
     event_probs = {}  # event_ticker -> prob dict
     
     # Collect unique event tickers
@@ -40,25 +64,37 @@ def main():
         
         event_ticker = None
         if away_ticker:
-            # Remove final -TEAM suffix
-            parts = away_ticker.split("-")
-            if len(parts) >= 3:
-                event_ticker = "-".join(parts[:-1])
+            event_ticker = derive_event_ticker(away_ticker)
         elif home_ticker:
-            parts = home_ticker.split("-")
-            if len(parts) >= 3:
-                event_ticker = "-".join(parts[:-1])
+            event_ticker = derive_event_ticker(home_ticker)
         
         if event_ticker:
             event_tickers.add(event_ticker)
             game_to_event[i] = event_ticker
     
-    # Fetch orderbook data for each event
-    for event_ticker in event_tickers:
-        prob_result = get_top_of_book_post_probs(event_ticker)
-        event_probs[event_ticker] = prob_result
+    # Fetch orderbook data for each event in parallel
+    if debug:
+        print(f"Fetching orderbook data for {len(event_tickers)} event(s) in parallel...")
     
-    # Step 3: Build moneylines table rows
+    # Parallelize fetching orderbooks for multiple events
+    with ThreadPoolExecutor(max_workers=min(len(event_tickers), 10)) as executor:
+        future_to_ticker = {
+            executor.submit(get_top_of_book_post_probs, event_ticker): event_ticker
+            for event_ticker in event_tickers
+        }
+        
+        for future in future_to_ticker:
+            event_ticker = future_to_ticker[future]
+            try:
+                prob_result = future.result()
+                event_probs[event_ticker] = prob_result
+            except Exception as e:
+                if debug:
+                    print(f"⚠️ Error fetching {event_ticker}: {e}")
+                # Store error result
+                event_probs[event_ticker] = {"error": str(e)}
+    
+    # Build moneylines table rows
     moneyline_rows = []
     
     for i, game in enumerate(games):
@@ -76,6 +112,10 @@ def main():
         yes_bid_top_p1_liq_away = prob_data.get("yes_bid_top_p1_liq_away") if prob_data else None
         yes_bid_top_liq_home = prob_data.get("yes_bid_top_liq_home") if prob_data else None
         yes_bid_top_p1_liq_home = prob_data.get("yes_bid_top_p1_liq_home") if prob_data else None
+        
+        # YES bid prices in cents (needed for dollar liquidity calculation)
+        yes_bid_top_c_away = prob_data.get("yes_bid_top_c_away") if prob_data else None
+        yes_bid_top_c_home = prob_data.get("yes_bid_top_c_home") if prob_data else None
         
         # Compute EVs (buyer/YES exposure perspective)
         away_fair = game.get("away_fair")
@@ -105,6 +145,8 @@ def main():
             "away_topm1_liq": yes_bid_top_p1_liq_away,
             "home_top_liq": yes_bid_top_liq_home,
             "home_topm1_liq": yes_bid_top_p1_liq_home,
+            "away_top_price_cents": yes_bid_top_c_away,
+            "home_top_price_cents": yes_bid_top_c_home,
             "away_ev_top": away_ev_top,
             "away_ev_topm1": away_ev_topm1,
             "home_ev_top": home_ev_top,
@@ -114,22 +156,157 @@ def main():
     # Sort by ROTO ascending
     moneyline_rows.sort(key=lambda x: (x.get('away_roto') is None, x.get('away_roto') or 0))
     
-    # Step 4: Get spreads data
-    spread_rows = []
-    try:
-        spread_rows = build_spreads_rows_for_today()
-    except Exception as e:
-        print(f"\nNote: Spreads table unavailable ({e})\n")
+    return moneyline_rows
+
+
+def build_all_rows(debug: bool = False, use_parallel: bool = True) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Build all table rows (moneylines, spreads, totals) from fetched data.
     
-    # Step 5: Get totals data
-    totals_rows = []
-    try:
-        totals_rows = build_totals_rows_for_today()
-    except Exception as e:
-        print(f"\nNote: Totals table unavailable ({e})\n")
+    Uses parallel execution to build spreads and totals tables simultaneously,
+    while sharing the pre-fetched games list and Unabated snapshot.
     
-    # Step 6: Render and open dashboard
-    open_dashboard_in_browser(moneyline_rows, spread_rows if spread_rows else None, totals_rows if totals_rows else None)
+    Pure function - no side effects, returns data only.
+    Suitable for use in Streamlit or other frameworks.
+    
+    Args:
+        debug: If True, print debug information
+        use_parallel: If True, build spreads and totals in parallel (default: True)
+    
+    Returns:
+        Tuple of (moneyline_rows, spread_rows, totals_rows)
+    """
+    start_time = time.time()
+    
+    if debug:
+        print("📊 Fetching shared data (games + snapshot)...")
+    
+    # Step 1: Fetch shared data once (used by all builders)
+    games = get_today_games_with_fairs_and_kalshi_tickers()
+    
+    if not games:
+        if debug:
+            print("No NBA games found for today")
+        return [], [], []
+    
+    if debug:
+        print(f"Found {len(games)} game(s)")
+    
+    # Fetch Unabated snapshot once (used by spreads and totals)
+    from core.reusable_functions import fetch_unabated_snapshot
+    snapshot = fetch_unabated_snapshot()
+    
+    if debug:
+        shared_fetch_time = time.time() - start_time
+        print(f"✓ Shared data fetched in {shared_fetch_time:.2f}s")
+    
+    # Step 2: Build moneylines (sequential, as it needs to complete before spreads/totals can use shared data)
+    if debug:
+        print("📊 Building moneylines table...")
+    
+    moneyline_start = time.time()
+    moneyline_rows = build_moneylines_rows(games, debug=debug)
+    
+    if debug:
+        moneyline_time = time.time() - moneyline_start
+        print(f"✓ Moneylines built in {moneyline_time:.2f}s ({len(moneyline_rows)} row(s))")
+    
+    # Step 3: Build spreads and totals in parallel (they use different Kalshi market types)
+    if use_parallel and debug:
+        print("🚀 Building spreads and totals tables in parallel...")
+    
+    parallel_start = time.time()
+    
+    if use_parallel:
+        # Use ThreadPoolExecutor to run spreads and totals builders in parallel
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both tasks
+            spreads_future = executor.submit(build_spreads_rows_for_today, games, snapshot)
+            totals_future = executor.submit(build_totals_rows_for_today, games, snapshot)
+            
+            # Wait for both to complete and handle errors
+            spread_rows = []
+            totals_rows = []
+            
+            try:
+                spread_rows = spreads_future.result()
+                if debug:
+                    print(f"✓ Spreads built ({len(spread_rows)} row(s))")
+            except Exception as e:
+                if debug:
+                    print(f"⚠️ Spreads table unavailable ({e})")
+            
+            try:
+                totals_rows = totals_future.result()
+                if debug:
+                    print(f"✓ Totals built ({len(totals_rows)} row(s))")
+            except Exception as e:
+                if debug:
+                    print(f"⚠️ Totals table unavailable ({e})")
+    else:
+        # Sequential fallback (for debugging or compatibility)
+        spread_rows = []
+        try:
+            spread_rows = build_spreads_rows_for_today(games, snapshot)
+            if debug:
+                print(f"Found {len(spread_rows)} spread row(s)")
+        except Exception as e:
+            if debug:
+                print(f"\nNote: Spreads table unavailable ({e})\n")
+        
+        totals_rows = []
+        try:
+            totals_rows = build_totals_rows_for_today(games, snapshot)
+            if debug:
+                print(f"Found {len(totals_rows)} totals row(s)")
+        except Exception as e:
+            if debug:
+                print(f"\nNote: Totals table unavailable ({e})\n")
+    
+    if debug:
+        parallel_time = time.time() - parallel_start
+        total_time = time.time() - start_time
+        print(f"✓ Parallel builds completed in {parallel_time:.2f}s")
+        print(f"✓ Total time: {total_time:.2f}s")
+    
+    return moneyline_rows, spread_rows, totals_rows
+
+
+def build_dashboard_html_all(
+    moneyline_rows: List[Dict[str, Any]],
+    spread_rows: Optional[List[Dict[str, Any]]] = None,
+    totals_rows: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """
+    Build HTML dashboard string from all table rows.
+    
+    Pure function - no side effects, returns HTML string only.
+    
+    Args:
+        moneyline_rows: List of moneyline row dicts
+        spread_rows: Optional list of spread row dicts
+        totals_rows: Optional list of totals row dicts
+    
+    Returns:
+        HTML content as string
+    """
+    return render_dashboard_html(moneyline_rows, spread_rows, totals_rows)
+
+
+def main():
+    """Main entry point - orchestrates data fetching and table building."""
+    moneyline_rows, spread_rows, totals_rows = build_all_rows(debug=True)
+    
+    if not moneyline_rows:
+        print("No NBA games found for today")
+        return
+    
+    # Render and open dashboard
+    open_dashboard_in_browser(
+        moneyline_rows,
+        spread_rows if spread_rows else None,
+        totals_rows if totals_rows else None
+    )
     
     # Also print console version
     from moneylines.table import print_dashboard
