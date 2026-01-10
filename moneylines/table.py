@@ -663,6 +663,15 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         is_started = is_game_started(event_start)
         row_class = "game-started" if is_started else ""
         
+        # Blank out fair odds and EVs for started games
+        if is_started:
+            away_fair_str = ""
+            home_fair_str = ""
+            away_ev_top_str = ""
+            home_ev_top_str = ""
+            away_fair_val = None
+            home_fair_val = None
+        
         html_content += f"""
                 <tr class="{row_class}">
                     <td class="date-cell">{row['game_date']}</td>
@@ -1015,6 +1024,13 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         is_started = is_game_started(event_start)
         started_marker = " *" if is_started else ""
         
+        # Blank out fair odds and EVs for started games
+        if is_started:
+            away_fair_str = ""
+            home_fair_str = ""
+            away_ev_top_str = ""
+            home_ev_top_str = ""
+        
         print(
             f"{row['game_date']:<12} "
             f"{game_time_str:<10}{started_marker} "
@@ -1168,6 +1184,13 @@ def main():
         game_time_str = format_game_time_pst(event_start)
         is_started = is_game_started(event_start)
         started_marker = " *" if is_started else ""
+        
+        # Blank out fair odds and EVs for started games
+        if is_started:
+            away_fair_str = ""
+            home_fair_str = ""
+            away_ev_top_str = ""
+            home_ev_top_str = ""
         
         print(
             f"{row['game_date']:<12} "
