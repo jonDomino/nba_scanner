@@ -18,7 +18,7 @@ Queue-jump: YES bid top+1¢ only if it doesn't cross the book (yes_bid_top_p1 < 
 import webbrowser
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 try:
@@ -98,12 +98,17 @@ def utc_to_pst_datetime(utc_timestamp: str) -> datetime:
 
 
 def format_game_time_pst(event_start: Optional[str]) -> str:
-    """Format game time as PST/PDT in hh:mm am/pm format."""
+    """Format game time as PST/PDT in hh:mm am/pm format.
+    
+    Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    """
     if not event_start:
         return "N/A"
     
     try:
         dt_pst = utc_to_pst_datetime(event_start)
+        # Add 10 minutes (Unabated shows time 10 minutes early)
+        dt_pst = dt_pst + timedelta(minutes=10)
         # Format as hh:mm am/pm (12-hour format)
         time_str = dt_pst.strftime("%I:%M %p")
         # Remove leading zero only from single-digit hours (e.g., "09:30 AM" -> "9:30 AM")
@@ -115,12 +120,17 @@ def format_game_time_pst(event_start: Optional[str]) -> str:
 
 
 def is_game_started(event_start: Optional[str]) -> bool:
-    """Check if game has already started (current time > game time)."""
+    """Check if game has already started (current time > game time + 10 minutes).
+    
+    Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    """
     if not event_start:
         return False
     
     try:
         game_time = utc_to_pst_datetime(event_start)
+        # Add 10 minutes (Unabated shows time 10 minutes early)
+        game_time = game_time + timedelta(minutes=10)
         if USE_PYTZ:
             import pytz
             now = datetime.now(pytz.timezone("America/Los_Angeles"))
@@ -597,10 +607,12 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>ROTO</th>
                     <th>Away Team</th>
                     <th>Home Team</th>
-                    <th title="Unabated consensus odds">Away Fair</th>
-                    <th title="Unabated consensus odds">Home Fair</th>
-                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Away Kalshi</th>
-                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Home Kalshi</th>
+                    <th>Away Kalshi</th>
+                    <th>Home Kalshi</th>
+                    <th>Away Liq</th>
+                    <th>Home Liq</th>
+                    <th title="Unabated consensus odds">Away Consensus</th>
+                    <th title="Unabated consensus odds">Home Consensus</th>
                     <th>Away EV</th>
                     <th>Home EV</th>
                 </tr>
@@ -759,16 +771,18 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <td class="prob-value">{away_roto_str}</td>
                     <td class="team-name">{row['away_team']}</td>
                     <td class="team-name">{row['home_team']}</td>
+                    <td class="prob-value odds-cell" data-prob="{away_top_val if away_top_val is not None else ''}" data-original="{away_top_str}">{away_top_str}</td>
+                    <td class="prob-value odds-cell" data-prob="{home_top_val if home_top_val is not None else ''}" data-original="{home_top_str}">{home_top_str}</td>
+                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {away_top_liq_str}" style="--liq-pct: {away_top_liq_pct}; --liq-gradient: {away_top_liq_gradient};">
+                        <div class="kalshi-cell-content">{away_top_liq_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
+                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};">
+                        <div class="kalshi-cell-content">{home_top_liq_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
                     <td class="prob-value odds-cell fair-cell" data-prob="{away_fair_val if away_fair_val is not None else ''}" data-original="{away_fair_str}">{away_fair_str}</td>
                     <td class="prob-value odds-cell fair-cell" data-prob="{home_fair_val if home_fair_val is not None else ''}" data-original="{home_fair_str}">{home_fair_str}</td>
-                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {away_top_liq_str}" style="--liq-pct: {away_top_liq_pct}; --liq-gradient: {away_top_liq_gradient};" data-prob="{away_top_val if away_top_val is not None else ''}" data-original="{away_top_str}">
-                        <div class="kalshi-cell-content">{away_top_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};" data-prob="{home_top_val if home_top_val is not None else ''}" data-original="{home_top_str}">
-                        <div class="kalshi-cell-content">{home_top_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
                     <td class="{away_ev_top_class}">{away_ev_top_str}</td>
                     <td class="{home_ev_top_class}">{home_ev_top_str}</td>
                 </tr>
@@ -800,8 +814,10 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>Home Team</th>
                     <th>Consensus</th>
                     <th>Strike</th>
-                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Away Kalshi</th>
-                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Home Kalshi</th>
+                    <th>Away Kalshi</th>
+                    <th>Home Kalshi</th>
+                    <th>Away Liq</th>
+                    <th>Home Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -906,26 +922,26 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <td class="team-name">{strike_str}</td>
 """
             
-            # Away Kalshi cell (with liquidity bar if value exists)
-            if away_kalshi_val is not None:
-                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};" data-prob="{away_kalshi_val}" data-original="{away_kalshi_str}">
-                        <div class="kalshi-cell-content">{away_kalshi_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            else:
-                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{away_kalshi_str}">{away_kalshi_str}</td>
+            # Away Kalshi cell (no bar chart)
+            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{away_kalshi_val if away_kalshi_val is not None else ''}" data-original="{away_kalshi_str}">{away_kalshi_str}</td>
 """
             
-            # Home Kalshi cell (with liquidity bar if value exists)
-            if home_kalshi_val is not None:
-                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Liq: {home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};" data-prob="{home_kalshi_val}" data-original="{home_kalshi_str}">
-                        <div class="kalshi-cell-content">{home_kalshi_str}</div>
+            # Home Kalshi cell (no bar chart)
+            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{home_kalshi_val if home_kalshi_val is not None else ''}" data-original="{home_kalshi_str}">{home_kalshi_str}</td>
+"""
+            
+            # Away Liq cell (with bar chart)
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
+                        <div class="kalshi-cell-content">{away_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
-            else:
-                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{home_kalshi_str}">{home_kalshi_str}</td>
+            
+            # Home Liq cell (with bar chart)
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
+                        <div class="kalshi-cell-content">{home_kalshi_liq_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
 """
             
             html_content += f"""                </tr>
@@ -957,8 +973,10 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>Home Team</th>
                     <th>Consensus</th>
                     <th>Strike</th>
-                    <th title="YES break-even price (top YES bid, maker join-queue, inc fees)">Over Kalshi</th>
-                    <th title="NO break-even price (top NO bid, maker join-queue, inc fees)">Under Kalshi</th>
+                    <th>Over Kalshi</th>
+                    <th>Under Kalshi</th>
+                    <th>Over Liq</th>
+                    <th>Under Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -1063,26 +1081,26 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <td class="team-name">{strike_str}</td>
 """
             
-            # Over Kalshi cell (with liquidity bar if value exists)
-            if over_kalshi_val is not None:
-                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Over Liq: {over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};" data-prob="{over_kalshi_val}" data-original="{over_kalshi_str}">
-                        <div class="kalshi-cell-content">{over_kalshi_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            else:
-                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{over_kalshi_str}">{over_kalshi_str}</td>
+            # Over Kalshi cell (no bar chart)
+            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{over_kalshi_val if over_kalshi_val is not None else ''}" data-original="{over_kalshi_str}">{over_kalshi_str}</td>
 """
             
-            # Under Kalshi cell (with liquidity bar if value exists)
-            if under_kalshi_val is not None:
-                html_content += f"""                    <td class="kalshi-cell prob-value odds-cell" title="Under Liq: {under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};" data-prob="{under_kalshi_val}" data-original="{under_kalshi_str}">
-                        <div class="kalshi-cell-content">{under_kalshi_str}</div>
+            # Under Kalshi cell (no bar chart)
+            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{under_kalshi_val if under_kalshi_val is not None else ''}" data-original="{under_kalshi_str}">{under_kalshi_str}</td>
+"""
+            
+            # Over Liq cell (with bar chart)
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
+                        <div class="kalshi-cell-content">{over_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
-            else:
-                html_content += f"""                    <td class="prob-value odds-cell" data-prob="" data-original="{under_kalshi_str}">{under_kalshi_str}</td>
+            
+            # Under Liq cell (with bar chart)
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
+                        <div class="kalshi-cell-content">{under_kalshi_liq_str}</div>
+                        <div class="liquidity-bar"></div>
+                    </td>
 """
             
             html_content += f"""                </tr>
