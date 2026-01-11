@@ -1031,8 +1031,12 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             # Format consensus
             consensus_str = row.get('consensus', 'N/A')
             
-            # Format strike
-            strike_str = row.get('strike', 'N/A')
+            # Format strike (add .5 suffix for display - Kalshi uses half-point increments but API returns integers)
+            strike_val = row.get('strike')
+            if strike_val is not None and strike_val != 'N/A':
+                strike_str = f"{strike_val}.5"
+            else:
+                strike_str = 'N/A'
             
             # Get Over/Under Kalshi values
             over_kalshi_val = row.get('over_kalshi_prob')

@@ -1,15 +1,6 @@
-WORKING MONEYLINES
-
-aa4b756
-Full hash: aa4b756e378a29bdb6029f8445afcb8dc9bb71e6
-
-WORKING SPREADS
+COMMIT
+git add -A; git commit -m "checkpoint"; git push; git rev-parse HEAD
 
 
-
-
-
-WORKING TOTALS
-
-5dc4275
-Full hash: 5dc42752631f6f65a66a5fbcba3a79fc695db28c
+LAST KNOWN STABLE:
+b966e807770383004bd070b6f713d0fdcb2b889f
