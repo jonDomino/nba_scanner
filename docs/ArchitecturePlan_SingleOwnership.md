@@ -169,6 +169,18 @@ class RunContext:
 
 **Location**: New module `data_build/orderbook_provider.py`
 
+**Concurrency Strategy**: **Prefetch-then-read-only** (recommended, least risky)
+- All required tickers are collected before builder execution
+- Pre-fetch all orderbooks in single parallel session (ThreadPoolExecutor)
+- Cache populated before builders run
+- Builders operate in read-only mode (cache hits only, no concurrent writes)
+- If cache miss occurs during builder execution (shouldn't happen), accept duplicate fetch (no locking needed)
+
+**Alternative Strategy**: Thread-safe with locking (if dynamic fetching needed)
+- Use `threading.Lock()` around cache read/write operations
+- More complex, but allows dynamic fetching during builder execution
+- Risk: Lock contention may slow down parallel builders
+
 **Definition**:
 ```python
 class OrderbookProvider:
@@ -176,15 +188,22 @@ class OrderbookProvider:
     Unified orderbook access point with process-scoped caching.
     
     Replaces module-level caches in spreads/builder.py and data_build/orderbook_snapshot.py.
+    
+    Concurrency: Designed for prefetch-then-read-only pattern.
+    If used with concurrent writers, caller must ensure thread-safety.
     """
     def __init__(self, ttl_seconds: int = 0):
         self._cache: Dict[str, Dict[str, Any]] = {}  # market_ticker -> orderbook dict
         self._cache_timestamps: Dict[str, float] = {}  # market_ticker -> timestamp
         self._ttl_seconds = ttl_seconds
+        # Note: No lock needed if using prefetch-then-read-only pattern
     
     def get(self, market_ticker: str, allow_cache: bool = True) -> Optional[Dict[str, Any]]:
         """
         Get orderbook for market_ticker (with caching).
+        
+        Thread-safety: Safe for concurrent reads. If concurrent writes expected,
+        caller must synchronize or use prefetch pattern.
         
         Args:
             market_ticker: Kalshi market ticker
@@ -193,15 +212,43 @@ class OrderbookProvider:
         Returns:
             Orderbook dict or None if fetch fails
         """
+        market_ticker = market_ticker.upper()
+        
         # Check cache
-        # Fetch if cache miss
-        # Store in cache
-        # Return orderbook
+        if allow_cache and market_ticker in self._cache:
+            cached = self._cache[market_ticker]
+            if self._ttl_seconds == 0 or (time.time() - self._cache_timestamps[market_ticker]) < self._ttl_seconds:
+                return cached
+        
+        # Cache miss - fetch fresh (should be rare if prefetch pattern used)
+        orderbook = fetch_orderbook(api_key_id, private_key_pem, market_ticker)
+        if orderbook:
+            self._cache[market_ticker] = orderbook
+            self._cache_timestamps[market_ticker] = time.time()
+        return orderbook
+    
+    def prefetch(self, tickers: List[str], max_workers: int = 10) -> None:
+        """
+        Pre-fetch all orderbooks in parallel (populates cache).
+        
+        This should be called before builder execution to ensure cache is warm.
+        After this completes, builder calls to get() should be cache hits only.
+        """
+        # Parallel fetch all tickers, populate cache
+        # ThreadPoolExecutor with max_workers
+        pass
+    
+    def clear_cache(self) -> None:
+        """Clear cache (for debugging)."""
+        self._cache.clear()
+        self._cache_timestamps.clear()
 ```
 
 **Usage**: All builders call `run_context.orderbook_provider.get(ticker)` instead of direct `fetch_orderbook()` calls
 
 **Scope**: Process-scoped (shared across all builders within single run, persists for process lifetime)
+
+**Thread-safety**: Prefetch pattern recommended (no locking needed). If dynamic fetching required, add locking or accept occasional duplicate fetches.
 
 ---
 
@@ -256,57 +303,64 @@ def build_spreads_rows_for_today(context: RunContext) -> List[Dict[str, Any]]:
 
 ## 4. New Order of Operations
 
-### 4.1 Execution Flow (Runtime Trace)
+### 4.1 Execution Flow (Runtime Trace) - **PROPOSED/TARGET STATE**
+
+**⚠️ NOTE**: This section describes the **target architecture**, not the current implementation. All steps below are **proposed changes** to be implemented during migration.
 
 **Invocation**: `streamlit run app.py`
 
-**Step 1**: Streamlit cache check (`app.py::get_cached_dashboard()`)
-- Cache hit (TTL < 30s): Return cached tuple, **STOP** (Steps 2-10 skipped)
+**Step 1**: Streamlit cache check (`app.py::get_cached_dashboard()`) **[UNCHANGED]**
+- Cache hit (TTL < 30s): Return cached tuple, **STOP** (Steps 2-7 skipped)
 - Cache miss: Continue to Step 2
 
-**Step 2**: Create RunContext (`orchestrator.py::build_all_rows()` → `build_run_context()`)
-- 2a. Check Unabated snapshot cache (module-level, TTL 30s)
-  - Cache hit: Use cached snapshot
+**Step 2**: Create RunContext (`orchestrator.py::build_all_rows()` → `build_run_context()`) **[NEW]**
+- 2a. Check Unabated snapshot cache (file-backed, TTL 30s) **[NEW]**
+  - Cache hit: Load from file cache
   - Cache miss: `core/reusable_functions.py::fetch_unabated_snapshot()` → **API CALL #1**
-- 2b. Load games list (with file cache check)
+  - Save to file cache for cross-process reuse
+- 2b. Validate snapshot structure, extract teams dict **[NEW]**
+- 2c. Load games list (with file cache check) **[NEW - uses games_cache.py]**
   - Check file cache: `ad_hoc/games_cache.csv` (date-based validation)
-  - Cache hit: Load from CSV
+  - Cache hit: Load from CSV, convert to expected format via adapter
   - Cache miss: `data_build/slate.py::get_today_games_with_fairs_and_kalshi_tickers(snapshot=snapshot)` → Uses snapshot from 2a (no duplicate fetch)
-- 2c. Load/restore Kalshi markets manifest (with file cache check)
+  - **CRITICAL**: Enforce canonical `game_key = f"{event_ticker}|{event_start}"` on all games at this boundary
+- 2d. Validate games structure (all games have `event_ticker`, `event_start`, `game_key`) **[NEW]**
+- 2e. Load/restore Kalshi markets manifest (with file cache check) **[NEW]**
   - Check file cache: `ad_hoc/kalshi_markets_manifest_YYYYMMDD.json` (TTL 60s)
-  - Cache hit: Load from JSON, restore to `KalshiMarkets` objects
-  - Cache miss: `data_build/kalshi_callsheet.py::fetch_kalshi_callsheet_for_slate(games)` → **API CALLS** (one per game for spreads + totals)
-- 2d. Create `OrderbookProvider` instance (empty cache initially)
-- 2e. Return `RunContext(snapshot, games, markets_manifest, orderbook_provider)`
+  - Cache hit: Load from JSON, restore to `KalshiMarkets` objects, key by `game_key` or `event_ticker`
+  - Cache miss: `data_build/kalshi_callsheet.py::fetch_kalshi_callsheet_for_slate(games)` → **API CALLS** (N calls: one per game for spreads + one per game for totals)
+  - Save to file cache for cross-process reuse
+- 2f. Create `OrderbookProvider` instance (empty cache initially, thread-safe design) **[NEW]**
+- 2g. Return `RunContext(snapshot, games, markets_manifest, orderbook_provider)`
 
-**Step 3**: Build moneylines (`orchestrator.py::build_moneylines_rows(games, context=run_context)`)
-- 3a. Extract unique `event_ticker` values from `context.games`
+**Step 3**: Build moneylines (`orchestrator.py::build_moneylines_rows(games, context=run_context)`) **[MODIFIED]**
+- 3a. Extract unique `event_ticker` values from `context.games` (games already have canonical keys)
 - 3b. For each event_ticker (parallel, 10 workers):
-  - Call `data_build/top_of_book.py::get_top_of_book_post_probs(event_ticker, orderbook_provider=context.orderbook_provider)`
-  - Internal: Fetches 2 orderbooks (away + home markets) via `context.orderbook_provider.get()`
-  - **API CALLS**: Only for cache misses (deduplicated by provider)
+  - Call `data_build/top_of_book.py::get_top_of_book_post_probs(event_ticker, orderbook_provider=context.orderbook_provider)` **[MODIFIED - accepts provider]**
+  - Internal: Fetches 2 orderbooks (away + home markets) via `context.orderbook_provider.get()` **[NEW]**
+  - **API CALLS**: Only for cache misses (deduplicated by provider, thread-safe)
 - 3c. Build rows, return `moneyline_rows`
 
-**Step 4**: Build spreads (parallel with totals)
-- 4a. `spreads/builder.py::build_spreads_rows_for_today(context=run_context)`
+**Step 4**: Build spreads (parallel with totals) **[MODIFIED]**
+- 4a. `spreads/builder.py::build_spreads_rows_for_today(context=run_context)` **[MODIFIED - accepts context]**
 - 4b. For each game:
-  - Get markets from `context.markets_manifest[event_ticker]` (no API call, from cache/manifest)
+  - Get markets from `context.markets_manifest[game_key]` or `context.markets_manifest[event_ticker]` **[NEW - no API call]**
   - Select closest strikes (uses Unabated consensus from `context.snapshot`)
-  - For each selected strike: `context.orderbook_provider.get(market_ticker)` → **API CALLS** only for cache misses
+  - For each selected strike: `context.orderbook_provider.get(market_ticker)` → **API CALLS** only for cache misses **[NEW]**
 - 4c. Build rows, return `spread_rows`
 
-**Step 5**: Build totals (parallel with spreads)
-- 5a. `totals/builder.py::build_totals_rows_for_today(context=run_context)`
+**Step 5**: Build totals (parallel with spreads) **[MODIFIED]**
+- 5a. `totals/builder.py::build_totals_rows_for_today(context=run_context)` **[MODIFIED - accepts context]**
 - 5b. For each game:
-  - Get markets from `context.markets_manifest[event_ticker]` (no API call, from cache/manifest)
+  - Get markets from `context.markets_manifest[game_key]` or `context.markets_manifest[event_ticker]` **[NEW - no API call]**
   - Select closest strikes (uses Unabated consensus from `context.snapshot`)
-  - For each selected strike: `context.orderbook_provider.get(market_ticker)` → **API CALLS** only for cache misses
+  - For each selected strike: `context.orderbook_provider.get(market_ticker)` → **API CALLS** only for cache misses **[NEW]**
 - 5c. Build rows, return `totals_rows`
 
-**Step 6**: Generate HTML (`dashboard_html.py::render_dashboard_html(moneyline_rows, spread_rows, totals_rows)`)
+**Step 6**: Generate HTML (`dashboard_html.py::render_dashboard_html(moneyline_rows, spread_rows, totals_rows)`) **[UNCHANGED]**
 - Pure function, no API calls
 
-**Step 7**: Store in Streamlit cache (`app.py::get_cached_dashboard()`)
+**Step 7**: Store in Streamlit cache (`app.py::get_cached_dashboard()`) **[UNCHANGED]**
 - Store tuple in Streamlit cache (TTL 30s)
 - Return tuple to caller
 
@@ -328,38 +382,51 @@ def build_spreads_rows_for_today(context: RunContext) -> List[Dict[str, Any]]:
 
 ### 5.1 Unabated Snapshot Cache
 
-**Owner**: Module-level singleton in `orchestrator_context.py` (or new `data_build/snapshot_cache.py`)
+**Owner**: Module-level helper in `orchestrator_context.py` (or new `data_build/snapshot_cache.py`)
 
-**Location**: Memory (module-level dict)
+**Location**: **File-backed** (with in-memory fallback) - critical for Streamlit process restarts
 
-**Key**: None (single entry, process-scoped)
+**Key**: Date-based filename: `ad_hoc/unabated_snapshot_YYYYMMDD.json` + timestamp check
 
-**TTL**: 30 seconds
+**TTL**: 30 seconds (file age check)
 
-**Scope**: Cross-run (survives Streamlit reruns within same process)
+**Scope**: Cross-process (survives Streamlit process restarts, dev mode restarts)
 
-**Invalidation**: Time-based (age > 30s), manual clear via `force_refresh` flag
+**Invalidation**: Time-based (file age > 30s), date mismatch, manual clear via `force_refresh` flag or file deletion
+
+**Rationale**: Streamlit dev mode and deploys restart processes frequently. File-backed cache ensures snapshot fetch (dominant latency) is reused even after process restart.
 
 **Implementation**:
 ```python
-_SNAPSHOT_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None  # (timestamp, snapshot)
-_SNAPSHOT_TTL_SECONDS = 30
+_SNAPSHOT_CACHE_FILE_TTL_SECONDS = 30
 
 def get_cached_snapshot(force_refresh: bool = False) -> Dict[str, Any]:
-    global _SNAPSHOT_CACHE
-    now = time.time()
+    """
+    Get Unabated snapshot with file-backed caching.
     
-    if not force_refresh and _SNAPSHOT_CACHE:
-        cache_time, cached_snapshot = _SNAPSHOT_CACHE
-        if now - cache_time < _SNAPSHOT_TTL_SECONDS:
-            return cached_snapshot
+    File cache survives process restarts (critical for Streamlit dev/deploy).
+    """
+    if not force_refresh:
+        # Try file cache first
+        cache_file = get_snapshot_cache_path()  # Date-based filename
+        if cache_file.exists():
+            file_age = time.time() - cache_file.stat().st_mtime
+            if file_age < _SNAPSHOT_CACHE_FILE_TTL_SECONDS:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
     
+    # Cache miss - fetch fresh
     snapshot = fetch_unabated_snapshot()
-    _SNAPSHOT_CACHE = (now, snapshot)
+    
+    # Save to file cache
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_file, 'w') as f:
+        json.dump(snapshot, f)
+    
     return snapshot
 ```
 
-**Debug bypass**: `build_run_context(force_refresh_snapshot=True)`
+**Debug bypass**: `build_run_context(force_refresh_snapshot=True)` or delete cache file
 
 ---
 
@@ -494,6 +561,9 @@ Streamlit cache (30s TTL)
 **Functions to modify**:
 - `orchestrator.py::build_all_rows()`: Call `build_run_context()`, extract `games` and `snapshot`, pass to builders (no builder changes yet)
 
+**Migration Invariants** (not yet enforced, but prepare for Step 2):
+- No invariants yet (backward compatible, builders still fetch independently)
+
 **Validation**:
 - Run `build_all_rows()` → Verify same behavior (builders still fetch snapshot if None)
 - Verify no performance regression
@@ -503,27 +573,36 @@ Streamlit cache (30s TTL)
 
 ---
 
-### Step 2: Single Ownership of Unabated Snapshot
+### Step 2: Single Ownership of Unabated Snapshot + Canonical Key Enforcement
 
-**Goal**: Eliminate duplicate snapshot fetch - snapshot fetched once, passed to all consumers
+**Goal**: Eliminate duplicate snapshot fetch + enforce canonical game keys at boundary
 
 **Files to modify**:
 - `data_build/unabated_callsheet.py`: `get_today_games_with_fairs(snapshot: Optional[Dict] = None)`
 - `data_build/slate.py`: `get_today_games_with_fairs_and_kalshi_tickers(snapshot: Optional[Dict] = None)`
-- `orchestrator_context.py`: Add module-level snapshot cache (Section 5.1)
-- `orchestrator.py`: `build_run_context()` fetches snapshot once (with cache), passes to games fetcher
+- `orchestrator_context.py`: Add file-backed snapshot cache (Section 5.1), add `_enforce_canonical_game_key()` function
+- `orchestrator.py`: `build_run_context()` fetches snapshot once (with file cache), passes to games fetcher, enforces canonical keys
+
+**Functions to add**:
+- `_enforce_canonical_game_key(games: List[Dict]) -> None`: Validate and set `game_key` on all games (fail fast)
 
 **Functions to modify**:
 - `get_today_games_with_fairs()`: Accept `snapshot` parameter, use if provided (no fetch if provided)
 - `get_today_games_with_fairs_and_kalshi_tickers()`: Accept `snapshot` parameter, pass to `get_today_games_with_fairs()`
-- `build_run_context()`: Fetch snapshot once (with cache), pass to games fetcher
+- `build_run_context()`: Fetch snapshot once (with file cache), pass to games fetcher, call `_enforce_canonical_game_key()` immediately after games loaded
+
+**Migration Invariants** (enforce via assertions/logging):
+- ✅ No builder calls `fetch_unabated_snapshot()` if `context.snapshot` is present
+- ✅ All games have `game_key` after `_enforce_canonical_game_key()` call
+- ✅ All games have both `event_ticker` and `event_start` before key enforcement
 
 **Validation**:
 - Verify `fetch_unabated_snapshot()` called exactly once per run (add logging/counters)
+- Verify all games have `game_key` after loading (assert in `build_run_context()`)
 - Verify games list still correct (no regression)
-- Verify snapshot cache works (second run in < 30s uses cache)
+- Verify snapshot file cache works (second run in < 30s uses cache, survives process restart)
 
-**Risk**: Low (backward compatible parameters, games fetcher still works if snapshot not provided)
+**Risk**: Low (backward compatible parameters, games fetcher still works if snapshot not provided). Key enforcement is strict but fails fast with clear errors.
 
 ---
 
@@ -540,19 +619,26 @@ Streamlit cache (30s TTL)
 **Functions to add**:
 - `load_markets_manifest_from_cache() -> Optional[Dict]`
 - `save_markets_manifest_to_cache(manifest: Dict) -> None`
-- `build_markets_manifest(games, markets_dict) -> Dict` (serialization helper)
+- `build_markets_manifest(games, markets_dict) -> Dict` (serialization helper, key by both `game_key` and `event_ticker`)
 
 **Functions to modify**:
-- `build_run_context()`: Load manifest from cache or call `fetch_kalshi_callsheet_for_slate()`, store in context
-- `build_spreads_rows_for_today()`: Use `context.markets_manifest` instead of calling `discover_kalshi_spread_markets()` per game
-- `build_totals_rows_for_today()`: Use `context.markets_manifest` instead of calling `discover_kalshi_totals_markets()` per game
+- `build_run_context()`: Load manifest from cache or call `fetch_kalshi_callsheet_for_slate()`, store in context (key by `game_key` and `event_ticker`)
+- `build_spreads_rows_for_today()`: Use `context.markets_manifest[game_key]` or `context.markets_manifest[event_ticker]` instead of calling `discover_kalshi_spread_markets()` per game
+- `build_totals_rows_for_today()`: Use `context.markets_manifest[game_key]` or `context.markets_manifest[event_ticker]` instead of calling `discover_kalshi_totals_markets()` per game
+
+**Migration Invariants** (enforce via assertions/logging):
+- ✅ No builder calls `fetch_kalshi_markets_for_event()` if `context.markets_manifest` is present
+- ✅ No builder calls `discover_kalshi_spread_markets()` if manifest present
+- ✅ No builder calls `discover_kalshi_totals_markets()` if manifest present
 
 **Validation**:
-- Verify markets discovery API calls reduced from 12 to 0-1 per run (with cache)
+- Verify markets discovery API calls: **0 with warm cache, N calls with cold cache** (where N = 2 × number of games: one call per game for spreads + one per game for totals)
+- **Clarification**: Cache eliminates **repetition** (discover once, reuse), not discovery entirely. Cold cache still requires N API calls.
 - Verify spreads/totals tables still build correctly
-- Verify manifest cache works (second run uses cache, no discovery calls)
+- Verify manifest cache works (second run uses cache, zero discovery calls)
+- Verify manifest keying works (lookup by `game_key` succeeds)
 
-**Risk**: Medium (requires refactoring builders to use manifest instead of discovery, cache key alignment critical)
+**Risk**: Medium (requires refactoring builders to use manifest instead of discovery, cache key alignment critical - mitigated by canonical key enforcement in Step 2)
 
 ---
 
@@ -560,9 +646,16 @@ Streamlit cache (30s TTL)
 
 **Goal**: Unified orderbook access point, shared cache across all builders
 
+**Concurrency Strategy**: **Prefetch-then-read-only** (recommended, least risky)
+- Collect all required tickers before builder execution
+- Call `provider.prefetch(tickers)` in `build_run_context()` (after markets manifest loaded)
+- Builders operate in read-only mode (cache hits only)
+- No locking needed (no concurrent writes)
+- Alternative: Accept occasional duplicate fetches if cache miss occurs (no corruption risk)
+
 **Files to modify**:
-- New file: `data_build/orderbook_provider.py`: Define `OrderbookProvider` class
-- `orchestrator_context.py`: Add `orderbook_provider` field to `RunContext`, create instance in `build_run_context()`
+- New file: `data_build/orderbook_provider.py`: Define `OrderbookProvider` class (with `prefetch()` method)
+- `orchestrator_context.py`: Add `orderbook_provider` field to `RunContext`, create instance in `build_run_context()`, call `prefetch()` after manifest loaded
 - `data_build/top_of_book.py`: `get_top_of_book_post_probs()` accepts `orderbook_provider: Optional[OrderbookProvider]`, uses if provided
 - `spreads/builder.py`: Remove `_orderbook_cache`, use `context.orderbook_provider.get()` instead of `_fetch_orderbook_with_cache()`
 - `totals/builder.py`: Use `context.orderbook_provider.get()` instead of importing `_fetch_orderbook_with_cache()`
@@ -570,20 +663,28 @@ Streamlit cache (30s TTL)
 
 **Functions to add**:
 - `OrderbookProvider.__init__()`
-- `OrderbookProvider.get(market_ticker, allow_cache=True) -> Optional[Dict]`
+- `OrderbookProvider.get(market_ticker, allow_cache=True) -> Optional[Dict]` (read-only after prefetch)
+- `OrderbookProvider.prefetch(tickers: List[str], max_workers: int = 10) -> None` (populates cache)
 - `OrderbookProvider.clear_cache() -> None` (for debugging)
 
 **Functions to modify**:
+- `build_run_context()`: After manifest loaded, collect all required tickers (moneylines + spreads + totals), call `provider.prefetch(tickers)`
 - `get_top_of_book_post_probs()`: Accept `orderbook_provider` parameter, use `provider.get()` instead of direct `fetch_orderbook()`
 - `get_spread_orderbook_data()`: Accept `orderbook_provider` parameter, use `provider.get()` instead of `_fetch_orderbook_with_cache()`
 - Builders: Pass `context.orderbook_provider` to orderbook-fetching functions
 
+**Migration Invariants** (enforce via assertions/logging):
+- ✅ No builder calls `fetch_orderbook()` directly if `context.orderbook_provider` is present
+- ✅ Prefetch called before builder execution (cache warm before builders run)
+- ✅ Cache hits expected during builder execution (log cache misses as warnings)
+
 **Validation**:
 - Verify orderbook fetches deduplicated (same ticker fetched once, reused across builders)
 - Verify moneylines and spreads/totals share cache (check cache hits across builders)
-- Verify no performance regression (cache lookups should be faster than API calls)
+- Verify prefetch pattern works (all tickers fetched before builders, cache hits during builder execution)
+- Verify no performance regression (cache lookups faster than API calls)
 
-**Risk**: Medium (requires refactoring multiple modules, cache key consistency critical)
+**Risk**: Medium (requires refactoring multiple modules, cache key consistency critical, but prefetch pattern reduces concurrency risk)
 
 ---
 
@@ -612,27 +713,69 @@ Streamlit cache (30s TTL)
 
 ## 7. Risks & Guardrails
 
-### 7.1 Cache Key Mismatches
+### 7.1 Cache Key Mismatches (CRITICAL - Hardest Problem)
 
-**Risk**: Different code paths use different keys for same resource (e.g., `event_ticker` vs `event_start`)
+**Risk**: Different code paths use different keys for same resource (e.g., `event_ticker` vs `event_start` vs `{away}_{home}`)
 
-**Examples**:
-- Games list keyed by `event_start`, markets manifest keyed by `event_ticker`
-- Team xref lookup: normalized names vs. raw names
+**Problem Severity**: **HIGHEST** - This is the single biggest source of bugs in the refactor. If canonical keys aren't enforced at the boundary, manifest/provider lookups will fail silently.
 
-**Guardrails**:
-- **Canonical key definition**: Establish `game_key = f"{event_ticker}|{event_start}"` as standard (add to all game dicts in Step 1)
-- **Validation**: `build_run_context()` validates all games have both `event_ticker` and `event_start` (fail fast)
-- **Logging**: Log cache key mismatches (warn if lookup fails, fallback behavior)
-- **Assertions**: Assert cache keys exist before lookup (raise ValueError if missing)
+**Current State**:
+- Games list keyed by `event_start` (used for Unabated event matching)
+- Markets manifest keyed by `event_ticker` (used for Kalshi market lookup)
+- Some code paths use derived `{away_code}_{home_code}` as fallback
+- No consistent canonical key across all data structures
 
-**Implementation**:
+**Examples of Failures**:
+- Market manifest lookup: `manifest.get(event_start)` fails if manifest keyed by `event_ticker`
+- Game-to-market join: `games[i]` doesn't match `markets[event_ticker]` if games keyed by `event_start`
+- Builders fail silently: Missing markets → empty rows → no error, just missing data
+
+**Guardrails** (MUST be implemented in Step 1):
+
+1. **Canonical key enforcement at boundary** (non-negotiable):
+   ```python
+   def _enforce_canonical_game_key(games: List[Dict[str, Any]]) -> None:
+       """
+       Enforce canonical game_key on all games at boundary.
+       
+       This MUST be called immediately after games are loaded/created,
+       before any downstream processing.
+       """
+       for game in games:
+           # Require both keys
+           if not game.get("event_ticker"):
+               raise ValueError(f"Game missing event_ticker: {game.keys()}")
+           if not game.get("event_start"):
+               raise ValueError(f"Game missing event_start: {game.keys()}")
+           
+           # Set canonical key
+           game["game_key"] = f"{game['event_ticker']}|{game['event_start']}"
+   ```
+
+2. **Validation in build_run_context()** (fail fast):
+   - Call `_enforce_canonical_game_key()` immediately after games loaded
+   - Assert all games have `game_key` before continuing
+   - Fail with clear error message if validation fails
+
+3. **Manifest keying strategy** (dual-key support):
+   - Markets manifest stored with BOTH `game_key` and `event_ticker` as keys
+   - Lookup tries `game_key` first, falls back to `event_ticker`
+   - Logs warning if fallback used (indicates key mismatch)
+
+4. **Assertions in builders** (defensive):
+   - Builders assert `game_key` exists before manifest lookup
+   - Raise ValueError with context if key missing (don't fail silently)
+
+**Implementation** (must happen in Step 1, not deferred):
 ```python
-def _validate_games(games: List[Dict[str, Any]]) -> None:
-    for game in games:
-        assert "event_ticker" in game, f"Game missing event_ticker: {game.keys()}"
-        assert "event_start" in game, f"Game missing event_start: {game.keys()}"
-        game["game_key"] = f"{game['event_ticker']}|{game['event_start']}"  # Canonical key
+def build_run_context(force_refresh_snapshot: bool = False) -> RunContext:
+    snapshot = get_cached_snapshot(force_refresh_snapshot)
+    games = load_games_list(snapshot)  # From cache or fetch
+    
+    # CRITICAL: Enforce canonical keys at boundary (fail fast if missing)
+    _enforce_canonical_game_key(games)
+    
+    # Continue with validated games...
 ```
 
 ---
@@ -702,9 +845,41 @@ def _validate_games(games: List[Dict[str, Any]]) -> None:
 
 ---
 
-## 8. Definition of Done
+## 8. Critical Success Factors
 
-### 8.1 Quantitative Metrics
+### 8.1 Canonical Game Identity Enforcement (Highest Priority)
+
+**Why it matters**: This is the single biggest source of bugs in the refactor. If canonical keys aren't enforced at the boundary, manifest/provider lookups will fail silently (missing data, not errors).
+
+**Success criteria**:
+- ✅ All games have `game_key = f"{event_ticker}|{event_start}"` after loading
+- ✅ Key enforcement happens at boundary (in `build_run_context()`, immediately after games loaded)
+- ✅ Validation fails fast (raises ValueError with context if keys missing)
+- ✅ Manifest keyed by both `game_key` and `event_ticker` (dual-key lookup)
+- ✅ Builders assert keys exist before lookup (defensive, not silent failures)
+
+**Implementation location**: Step 2 (must not be deferred)
+
+---
+
+### 8.2 Single Concurrency Strategy for Orderbooks
+
+**Why it matters**: Multiple builders access orderbooks concurrently. Without a clear strategy, you risk cache corruption, duplicate fetches, or race conditions.
+
+**Success criteria**:
+- ✅ Prefetch-then-read-only pattern implemented (recommended, least risky)
+- ✅ All tickers collected before builder execution
+- ✅ `provider.prefetch()` called in `build_run_context()` (after manifest loaded)
+- ✅ Builders operate in read-only mode (cache hits only, no concurrent writes)
+- ✅ Alternative strategy documented if dynamic fetching needed (locking or accept duplicates)
+
+**Implementation location**: Step 4 (prefetch pattern) or Step 5 (optional optimization)
+
+---
+
+## 9. Definition of Done
+
+### 9.1 Quantitative Metrics
 
 **Unabated snapshot fetches per run**: **1** (down from 2)
 - Measurement: Count `fetch_unabated_snapshot()` calls in single `build_all_rows()` execution
@@ -712,6 +887,7 @@ def _validate_games(games: List[Dict[str, Any]]) -> None:
 
 **Kalshi markets discovery calls per run** (with warm cache): **0** (down from 12)
 - Measurement: Count `fetch_kalshi_markets_for_event()` calls in single run (after first run with cache)
+- **Clarification**: Cache eliminates **repetition** (discover once, reuse). Cold cache still requires N calls (2 × number of games: spreads + totals per game). Warm cache = 0 calls.
 - Validation: Verify cache hit on second run, zero discovery calls
 
 **Orderbook fetches per run**: **Unique tickers only** (no duplicates across builders)
@@ -729,7 +905,7 @@ def _validate_games(games: List[Dict[str, Any]]) -> None:
 
 ---
 
-### 8.2 Qualitative Criteria
+### 9.2 Qualitative Criteria
 
 **Backward compatibility**: All existing features preserved
 - All tables build correctly (moneylines, spreads, totals)
@@ -748,7 +924,7 @@ def _validate_games(games: List[Dict[str, Any]]) -> None:
 
 ---
 
-### 8.3 Validation Checklist
+### 9.3 Validation Checklist
 
 **Functional**:
 - [ ] All three tables build successfully (moneylines, spreads, totals)
