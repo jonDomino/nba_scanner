@@ -773,11 +773,11 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <td class="team-name">{row['home_team']}</td>
                     <td class="prob-value odds-cell" data-prob="{away_top_val if away_top_val is not None else ''}" data-original="{away_top_str}">{away_top_str}</td>
                     <td class="prob-value odds-cell" data-prob="{home_top_val if home_top_val is not None else ''}" data-original="{home_top_str}">{home_top_str}</td>
-                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {away_top_liq_str}" style="--liq-pct: {away_top_liq_pct}; --liq-gradient: {away_top_liq_gradient};">
+                    <td class="kalshi-cell prob-value" title="{away_top_liq_str}" style="--liq-pct: {away_top_liq_pct}; --liq-gradient: {away_top_liq_gradient};">
                         <div class="kalshi-cell-content">{away_top_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
-                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};">
+                    <td class="kalshi-cell prob-value" title="{home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};">
                         <div class="kalshi-cell-content">{home_top_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
@@ -931,14 +931,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 """
             
             # Away Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="{away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{away_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
             
             # Home Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="{home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{home_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
@@ -1031,10 +1031,17 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             # Format consensus
             consensus_str = row.get('consensus', 'N/A')
             
-            # Format strike (add .5 suffix for display - Kalshi uses half-point increments but API returns integers)
+            # Format strike (replace trailing .0 with .5 for display - Kalshi uses half-point increments but API returns integers)
             strike_val = row.get('strike')
             if strike_val is not None and strike_val != 'N/A':
-                strike_str = f"{strike_val}.5"
+                strike_str = str(strike_val)
+                # If it ends with .0, replace with .5; otherwise if it's a whole number, append .5
+                if strike_str.endswith('.0'):
+                    strike_str = strike_str[:-2] + '.5'
+                elif '.' not in strike_str:
+                    # It's an integer, append .5
+                    strike_str = f"{strike_str}.5"
+                # If it already has a decimal part other than .0, leave it as is
             else:
                 strike_str = 'N/A'
             
@@ -1094,14 +1101,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 """
             
             # Over Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="{over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{over_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
             
             # Under Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="Dollar liquidity: {under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" title="{under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{under_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
