@@ -10,6 +10,7 @@ from cryptography.hazmat.backends import default_backend
 from typing import Dict, Any, Optional
 
 from utils import config
+from utils.creds_loader import load_creds_file
 
 
 def load_creds():
@@ -28,6 +29,21 @@ def load_creds():
     private_key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
     
     if api_key_id and private_key_pem:
+        return api_key_id.strip(), private_key_pem
+
+    # Local fallback: creds_local.txt / creds.txt
+    creds = load_creds_file()
+    api_key_id = creds.get("KALSHI_API_KEY_ID")
+    private_key_pem = creds.get("KALSHI_PRIVATE_KEY_PEM")
+    private_key_pem_file = creds.get("KALSHI_PRIVATE_KEY_PEM_FILE")
+    if api_key_id and (private_key_pem or private_key_pem_file):
+        if not private_key_pem and private_key_pem_file:
+            # Support explicit file path reference
+            from pathlib import Path
+            p = Path(private_key_pem_file)
+            if not p.is_absolute():
+                p = Path(".") / private_key_pem_file
+            private_key_pem = p.read_text(encoding="utf-8")
         return api_key_id.strip(), private_key_pem
     
     # Fall back to local files (local development)

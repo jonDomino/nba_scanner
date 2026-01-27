@@ -244,6 +244,12 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         .table-toggle-button:hover {
             background-color: #333;
         }
+
+        /* Click-to-sort headers (no visible indicator) */
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
         
         .toggle-button {
             position: absolute;
@@ -584,7 +590,92 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     totalsBtn.textContent = 'Show';
                 }
             }
+
+            // Default: sort moneylines by EV desc
+            // Column order: ... Kalshi(7), Pinnacle(8), EV(9), Liq(10)
+            sortTable('moneylinesTable', 9, 'num', 'desc');
         });
+
+        // -----------------------------
+        // Sorting (EV + Liquidity)
+        // -----------------------------
+        const __sortState = {}; // key: `${containerId}:${colIndex}` -> boolean asc
+
+        function __parseNumFromText(text) {
+            if (!text) return null;
+            let t = text.trim();
+            if (!t || t === "N/A") return null;
+
+            // Remove common formatting
+            t = t.replace(/[$,%\\s,]/g, "");
+
+            // Handle K/M suffixes (e.g., 1.7K, 2.0M)
+            let mult = 1.0;
+            if (/[Kk]$/.test(t)) { mult = 1_000.0; t = t.slice(0, -1); }
+            if (/[Mm]$/.test(t)) { mult = 1_000_000.0; t = t.slice(0, -1); }
+
+            const n = parseFloat(t);
+            if (Number.isNaN(n)) return null;
+            return n * mult;
+        }
+
+        function __getSortValue(cell, type) {
+            if (!cell) return null;
+            const ds = cell.getAttribute("data-sort");
+            if (ds !== null && ds !== "") {
+                const n = parseFloat(ds);
+                return Number.isNaN(n) ? null : n;
+            }
+            const txt = cell.textContent || "";
+            if (type === "num") return __parseNumFromText(txt);
+            return (txt || "").trim().toLowerCase();
+        }
+
+        function sortTable(containerId, colIndex, type = "num", forceDir = null) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const table = container.querySelector("table");
+            if (!table || !table.tBodies || !table.tBodies.length) return;
+            const tbody = table.tBodies[0];
+
+            const key = `${containerId}:${colIndex}`;
+            let asc = !(__sortState[key] === true);
+            if (forceDir === "asc") asc = true;
+            if (forceDir === "desc") asc = false;
+            __sortState[key] = asc;
+
+            // Update header classes
+            const ths = table.tHead && table.tHead.rows && table.tHead.rows[0] ? table.tHead.rows[0].cells : [];
+            for (let i = 0; i < ths.length; i++) {
+                ths[i].classList.remove("sort-asc", "sort-desc");
+            }
+            if (ths[colIndex]) {
+                ths[colIndex].classList.add(asc ? "sort-asc" : "sort-desc");
+            }
+
+            const rows = Array.from(tbody.rows);
+            rows.sort((a, b) => {
+                const va = __getSortValue(a.cells[colIndex], type);
+                const vb = __getSortValue(b.cells[colIndex], type);
+
+                const aNull = (va === null || va === undefined || va === "");
+                const bNull = (vb === null || vb === undefined || vb === "");
+                if (aNull && bNull) return 0;
+                if (aNull) return 1;
+                if (bNull) return -1;
+
+                if (type === "num") {
+                    return asc ? (va - vb) : (vb - va);
+                }
+                // text
+                if (va < vb) return asc ? -1 : 1;
+                if (va > vb) return asc ? 1 : -1;
+                return 0;
+            });
+
+            // Re-attach in new order
+            for (const r of rows) tbody.appendChild(r);
+        }
     </script>
 </head>
 <body>
@@ -605,16 +696,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>Game Date</th>
                     <th>Game Time</th>
                     <th>ROTO</th>
-                    <th>Away Team</th>
-                    <th>Home Team</th>
-                    <th>Away Kalshi</th>
-                    <th>Home Kalshi</th>
-                    <th>Away Liq</th>
-                    <th>Home Liq</th>
-                    <th title="Unabated consensus odds">Away Consensus</th>
-                    <th title="Unabated consensus odds">Home Consensus</th>
-                    <th>Away EV</th>
-                    <th>Home EV</th>
+                    <th>Market</th>
+                    <th>Side</th>
+                    <th>Line</th>
+                    <th>Team</th>
+                    <th>Kalshi</th>
+                    <th>Pinnacle</th>
+                    <th class="sortable" onclick="sortTable('moneylinesTable', 9, 'num')">EV</th>
+                    <th class="sortable" onclick="sortTable('moneylinesTable', 10, 'num')">Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -690,62 +779,42 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             # Yellow to green (66-100%)
             return "linear-gradient(to right, #fbbf24 0%, #4ade80 100%)"
     
-    # Find max dollar liquidity for scaling bars (only from top columns, not +1c columns)
+    # Find max dollar liquidity for scaling bars
     max_dollar_liq = 0.0
     for row in table_rows:
-        for liq_key, price_key in [('away_top_liq', 'away_top_price_cents'), ('home_top_liq', 'home_top_price_cents')]:
-            dollar_liq = calc_dollar_liq(row.get(price_key), row.get(liq_key))
-            if dollar_liq is not None:
-                max_dollar_liq = max(max_dollar_liq, dollar_liq)
+        dollar_liq = calc_dollar_liq(row.get("kalshi_price_cents"), row.get("kalshi_liq"))
+        if dollar_liq is not None:
+            max_dollar_liq = max(max_dollar_liq, dollar_liq)
     
     # If no liquidity found, set default max to avoid division by zero
     if max_dollar_liq == 0:
         max_dollar_liq = 10000.0  # Default max for scaling ($10,000)
     
     for row in table_rows:
-        # Get probability values (used for both display and data attributes)
-        away_fair_val = row['away_fair']
-        home_fair_val = row['home_fair']
-        away_top_val = row['away_top_prob']
-        home_top_val = row['home_top_prob']
-        
-        # Format values as probabilities (default view)
-        away_fair_str = f"{away_fair_val:.3f}" if away_fair_val is not None else "N/A"
-        home_fair_str = f"{home_fair_val:.3f}" if home_fair_val is not None else "N/A"
-        
-        away_top_str = f"{away_top_val:.4f}" if away_top_val is not None else "N/A"
-        home_top_str = f"{home_top_val:.4f}" if home_top_val is not None else "N/A"
-        
-        # Format liquidity for tooltips in dollars (only for top columns, not +1c)
-        # Calculate dollar value: (price_cents / 100.0) * contracts
-        away_top_liq_str = format_liq_dollars(
-            row.get('away_top_price_cents'),
-            row.get('away_top_liq')
-        )
-        home_top_liq_str = format_liq_dollars(
-            row.get('home_top_price_cents'),
-            row.get('home_top_liq')
-        )
-        
-        # Calculate dollar liquidity and bar percentages/gradients (only for top columns, not +1c)
-        away_top_dollar_liq = calc_dollar_liq(row.get('away_top_price_cents'), row.get('away_top_liq'))
-        home_top_dollar_liq = calc_dollar_liq(row.get('home_top_price_cents'), row.get('home_top_liq'))
-        
-        away_top_liq_pct = calc_liq_bar_pct(away_top_dollar_liq, max_dollar_liq)
-        home_top_liq_pct = calc_liq_bar_pct(home_top_dollar_liq, max_dollar_liq)
-        
-        away_top_liq_gradient = calc_liq_gradient(away_top_dollar_liq, max_dollar_liq)
-        home_top_liq_gradient = calc_liq_gradient(home_top_dollar_liq, max_dollar_liq)
-        
-        # Format EVs with color classes
-        away_ev_top_val = row['away_ev_top']
-        away_ev_top_str = format_ev_percent(away_ev_top_val)
-        away_ev_top_class = "ev-positive" if away_ev_top_val and away_ev_top_val > 0 else ("ev-negative" if away_ev_top_val and away_ev_top_val < 0 else "ev-neutral")
-        
-        home_ev_top_val = row['home_ev_top']
-        home_ev_top_str = format_ev_percent(home_ev_top_val)
-        home_ev_top_class = "ev-positive" if home_ev_top_val and home_ev_top_val > 0 else ("ev-negative" if home_ev_top_val and home_ev_top_val < 0 else "ev-neutral")
-        
+        # Get values (used for both display and sorting)
+        market = row.get("market") or "ML"
+        side = row.get("side") or ""
+        line = row.get("line")
+        line_str = "" if line is None else str(line)
+        team = row.get("team") or "N/A"
+
+        kalshi_val = row.get("kalshi_prob")
+        pinnacle_val = row.get("pinnacle_prob")
+        ev_val = row.get("ev")
+
+        kalshi_str = f"{kalshi_val:.4f}" if kalshi_val is not None else "N/A"
+        pinnacle_str = f"{pinnacle_val:.3f}" if pinnacle_val is not None else "N/A"
+        ev_str = format_ev_percent(ev_val)
+        ev_class = "ev-positive" if (ev_val is not None and ev_val > 0) else ("ev-negative" if (ev_val is not None and ev_val < 0) else "ev-neutral")
+
+        # Liquidity (display dollars; sort by dollars)
+        liq_contracts = row.get("kalshi_liq")
+        liq_price_cents = row.get("kalshi_price_cents")
+        liq_str = format_liq_dollars(liq_price_cents, liq_contracts)
+        dollar_liq = calc_dollar_liq(liq_price_cents, liq_contracts)
+        liq_pct = calc_liq_bar_pct(dollar_liq, max_dollar_liq)
+        liq_gradient = calc_liq_gradient(dollar_liq, max_dollar_liq)
+
         away_roto = row.get('away_roto')
         away_roto_str = str(away_roto) if away_roto is not None else "N/A"
         
@@ -757,34 +826,27 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         
         # Blank out fair odds and EVs for started games
         if is_started:
-            away_fair_str = ""
-            home_fair_str = ""
-            away_ev_top_str = ""
-            home_ev_top_str = ""
-            away_fair_val = None
-            home_fair_val = None
+            pinnacle_str = ""
+            ev_str = ""
+            pinnacle_val = None
+            ev_val = None
         
         html_content += f"""
                 <tr class="{row_class}">
                     <td class="date-cell">{row['game_date']}</td>
                     <td class="date-cell">{game_time_str}</td>
                     <td class="prob-value">{away_roto_str}</td>
-                    <td class="team-name">{row['away_team']}</td>
-                    <td class="team-name">{row['home_team']}</td>
-                    <td class="prob-value odds-cell" data-prob="{away_top_val if away_top_val is not None else ''}" data-original="{away_top_str}">{away_top_str}</td>
-                    <td class="prob-value odds-cell" data-prob="{home_top_val if home_top_val is not None else ''}" data-original="{home_top_str}">{home_top_str}</td>
-                    <td class="kalshi-cell prob-value" title="{away_top_liq_str}" style="--liq-pct: {away_top_liq_pct}; --liq-gradient: {away_top_liq_gradient};">
-                        <div class="kalshi-cell-content">{away_top_liq_str}</div>
+                    <td class="prob-value">{market}</td>
+                    <td class="prob-value">{side}</td>
+                    <td class="prob-value">{line_str}</td>
+                    <td class="team-name">{team}</td>
+                    <td class="prob-value odds-cell" data-prob="{kalshi_val if kalshi_val is not None else ''}" data-original="{kalshi_str}">{kalshi_str}</td>
+                    <td class="prob-value odds-cell fair-cell" data-prob="{pinnacle_val if pinnacle_val is not None else ''}" data-original="{pinnacle_str}">{pinnacle_str}</td>
+                    <td class="{ev_class}" data-sort="{ev_val if ev_val is not None else ''}">{ev_str}</td>
+                    <td class="kalshi-cell prob-value" data-sort="{dollar_liq if dollar_liq is not None else ''}" style="--liq-pct: {liq_pct}; --liq-gradient: {liq_gradient};">
+                        <div class="kalshi-cell-content">{liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
-                    <td class="kalshi-cell prob-value" title="{home_top_liq_str}" style="--liq-pct: {home_top_liq_pct}; --liq-gradient: {home_top_liq_gradient};">
-                        <div class="kalshi-cell-content">{home_top_liq_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-                    <td class="prob-value odds-cell fair-cell" data-prob="{away_fair_val if away_fair_val is not None else ''}" data-original="{away_fair_str}">{away_fair_str}</td>
-                    <td class="prob-value odds-cell fair-cell" data-prob="{home_fair_val if home_fair_val is not None else ''}" data-original="{home_fair_str}">{home_fair_str}</td>
-                    <td class="{away_ev_top_class}">{away_ev_top_str}</td>
-                    <td class="{home_ev_top_class}">{home_ev_top_str}</td>
                 </tr>
 """
     
@@ -816,8 +878,8 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>Strike</th>
                     <th>Away Kalshi</th>
                     <th>Home Kalshi</th>
-                    <th>Away Liq</th>
-                    <th>Home Liq</th>
+                    <th class="sortable" onclick="sortTable('spreadsTable', 9, 'num')">Away Liq</th>
+                    <th class="sortable" onclick="sortTable('spreadsTable', 10, 'num')">Home Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -931,14 +993,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 """
             
             # Away Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="{away_kalshi_liq_str}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{away_kalshi_dollar_liq if away_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{away_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
             
             # Home Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="{home_kalshi_liq_str}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{home_kalshi_dollar_liq if home_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{home_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
@@ -975,8 +1037,8 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     <th>Strike</th>
                     <th>Over Kalshi</th>
                     <th>Under Kalshi</th>
-                    <th>Over Liq</th>
-                    <th>Under Liq</th>
+                    <th class="sortable" onclick="sortTable('totalsTable', 9, 'num')">Over Liq</th>
+                    <th class="sortable" onclick="sortTable('totalsTable', 10, 'num')">Under Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -1101,14 +1163,14 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 """
             
             # Over Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="{over_kalshi_liq_str}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{over_kalshi_dollar_liq if over_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{over_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
 """
             
             # Under Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" title="{under_kalshi_liq_str}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
+            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{under_kalshi_dollar_liq if under_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
                         <div class="kalshi-cell-content">{under_kalshi_liq_str}</div>
                         <div class="liquidity-bar"></div>
                     </td>
@@ -1156,20 +1218,20 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
     """
     Print a simplified dashboard table without tickers (console version).
     
-    Shows: GameDate, AwayTeam, HomeTeam, Unabated fair odds, Kalshi odds, EVs
+    Shows: GameDate, GameTime, ROTO, Market, Side, Line, Team, Pinnacle, Kalshi, Liq, EV
     """
     header = (
         f"{'GameDate':<12} "
         f"{'GameTime':<10} "
         f"{'ROTO':<6} "
-        f"{'AwayTeam':<30} "
-        f"{'HomeTeam':<30} "
-        f"{'AwayFair':<10} "
-        f"{'HomeFair':<10} "
-        f"{'AwayKalshi':<12} "
-        f"{'HomeKalshi':<12} "
-        f"{'Away_EV':<10} "
-        f"{'Home_EV':<10}"
+        f"{'MKT':<4} "
+        f"{'SIDE':<5} "
+        f"{'LINE':<6} "
+        f"{'TEAM':<30} "
+        f"{'PIN':<10} "
+        f"{'KALSHI':<12} "
+        f"{'LIQ':<10} "
+        f"{'EV':<10}"
     )
     
     print("\n" + "=" * len(header.expandtabs()))
@@ -1179,17 +1241,22 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
     print("-" * len(header.expandtabs()))
     
     for row in table_rows:
-        # Format Unabated fair probabilities
-        away_fair_str = f"{row['away_fair']:.3f}" if row['away_fair'] is not None else "N/A"
-        home_fair_str = f"{row['home_fair']:.3f}" if row['home_fair'] is not None else "N/A"
-        
-        # Format Kalshi break-even probabilities
-        away_top_str = f"{row['away_top_prob']:.4f}" if row['away_top_prob'] is not None else "N/A"
-        home_top_str = f"{row['home_top_prob']:.4f}" if row['home_top_prob'] is not None else "N/A"
-        
-        # Format EVs
-        away_ev_top_str = format_ev_percent(row['away_ev_top'])
-        home_ev_top_str = format_ev_percent(row['home_ev_top'])
+        market = row.get("market") or "ML"
+        side = row.get("side") or ""
+        line = row.get("line")
+        line_str = "" if line is None else str(line)
+        team = row.get("team") or "N/A"
+
+        pinnacle_val = row.get("pinnacle_prob")
+        pinnacle_str = f"{pinnacle_val:.3f}" if pinnacle_val is not None else "N/A"
+
+        kalshi_val = row.get("kalshi_prob")
+        kalshi_str = f"{kalshi_val:.4f}" if kalshi_val is not None else "N/A"
+
+        # Liquidity (dollars)
+        liq_str = format_liq_dollars(row.get("kalshi_price_cents"), row.get("kalshi_liq"))
+
+        ev_str = format_ev_percent(row.get("ev"))
         
         away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
         event_start = row.get('event_start')
@@ -1197,25 +1264,23 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         is_started = is_game_started(event_start)
         started_marker = " *" if is_started else ""
         
-        # Blank out fair odds and EVs for started games
+        # Blank out pinnacle and EV for started games
         if is_started:
-            away_fair_str = ""
-            home_fair_str = ""
-            away_ev_top_str = ""
-            home_ev_top_str = ""
+            pinnacle_str = ""
+            ev_str = ""
         
         print(
             f"{row['game_date']:<12} "
             f"{game_time_str:<10}{started_marker} "
             f"{away_roto_str:<6} "
-            f"{row['away_team']:<30} "
-            f"{row['home_team']:<30} "
-            f"{away_fair_str:<10} "
-            f"{home_fair_str:<10} "
-            f"{away_top_str:<12} "
-            f"{home_top_str:<12} "
-            f"{away_ev_top_str:<10} "
-            f"{home_ev_top_str:<10}"
+            f"{market:<4} "
+            f"{side:<5} "
+            f"{line_str:<6} "
+            f"{team:<30} "
+            f"{pinnacle_str:<10} "
+            f"{kalshi_str:<12} "
+            f"{liq_str:<10} "
+            f"{ev_str:<10}"
         )
     
     print("=" * len(header.expandtabs()) + "\n")

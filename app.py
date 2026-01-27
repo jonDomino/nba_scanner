@@ -51,6 +51,14 @@ if hasattr(st, 'secrets'):
         import sys
         print(f"Note: Error reading Streamlit secrets: {type(e).__name__}: {e}", file=sys.stderr)
 
+# Local fallback: load creds from gitignored creds_local.txt/creds.txt into env
+try:
+    from utils.creds_loader import apply_creds_to_environ
+    apply_creds_to_environ(keys=["KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PEM", "UNABATED_API_KEY"])
+except Exception:
+    # Never block the app on local creds loading
+    pass
+
 from orchestrator import build_all_rows, build_dashboard_html_all
 
 # Configure Streamlit page
@@ -115,6 +123,24 @@ def main():
                     st.write(f"**Environment variables set:** {env_vars_set}")
                     st.write(f"**UNABATED_API_KEY in env:** {bool(os.getenv('UNABATED_API_KEY'))}")
                     st.write(f"**UNABATED_API_KEY in secrets:** {'UNABATED_API_KEY' in (secrets_available if secrets_available else [])}")
+
+                    # Local creds file status (does not print secrets)
+                    try:
+                        from pathlib import Path
+                        from utils.creds_loader import load_creds_file
+
+                        root = Path(__file__).resolve().parent
+                        creds_local = root / "creds_local.txt"
+                        creds_txt = root / "creds.txt"
+                        creds = load_creds_file()
+
+                        st.write("**Local creds files**:")
+                        st.write(f"- creds_local.txt exists: {creds_local.exists()}")
+                        st.write(f"- creds.txt exists: {creds_txt.exists()}")
+                        st.write(f"**Keys found in creds file:** {sorted(list(creds.keys())) if creds else []}")
+                        st.write("**Expected keys for live local:** ['UNABATED_API_KEY', 'KALSHI_API_KEY_ID', 'KALSHI_PRIVATE_KEY_PEM']")
+                    except Exception as _e:
+                        st.write(f"**Local creds debug failed:** {type(_e).__name__}: {_e}")
         except Exception as e:
             # Ignore debug errors
             pass
@@ -144,7 +170,8 @@ def main():
         st.caption(f"Last updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} PST")
     
     # Display game count
-    st.info(f"Showing {len(moneyline_rows)} moneyline game(s), {len(spread_rows) if spread_rows else 0} spread row(s), {len(totals_rows) if totals_rows else 0} totals row(s)")
+    moneyline_games = len({r.get("event_start") for r in (moneyline_rows or []) if isinstance(r, dict) and r.get("event_start")}) if moneyline_rows else 0
+    st.info(f"Showing {moneyline_games} moneyline game(s), {len(spread_rows) if spread_rows else 0} spread row(s), {len(totals_rows) if totals_rows else 0} totals row(s)")
     
     # Embed HTML dashboard
     # Use height=1200 for comfortable viewing, scrolling enabled
@@ -152,7 +179,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Data source: Unabated (consensus odds) + Kalshi (orderbook prices)")
+    st.caption("Data source: Unabated snapshot (prefers Pinnacle ms70; falls back ms58/ms7/ms49) + Kalshi (orderbook prices)")
 
 
 if __name__ == "__main__":

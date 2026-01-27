@@ -72,30 +72,34 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
             event_tickers.add(event_ticker)
             game_to_event[i] = event_ticker
     
-    # Fetch orderbook data for each event in parallel
-    if debug:
-        print(f"Fetching orderbook data for {len(event_tickers)} event(s) in parallel...")
-    
-    # Parallelize fetching orderbooks for multiple events
-    with ThreadPoolExecutor(max_workers=min(len(event_tickers), 10)) as executor:
-        future_to_ticker = {
-            executor.submit(get_top_of_book_post_probs, event_ticker): event_ticker
-            for event_ticker in event_tickers
-        }
+    # Fetch orderbook data for each event in parallel (if we have event tickers)
+    if event_tickers:
+        if debug:
+            print(f"Fetching orderbook data for {len(event_tickers)} event(s) in parallel...")
         
-        for future in future_to_ticker:
-            event_ticker = future_to_ticker[future]
-            try:
-                prob_result = future.result()
-                event_probs[event_ticker] = prob_result
-            except Exception as e:
-                if debug:
-                    print(f"⚠️ Error fetching {event_ticker}: {e}")
-                # Store error result
-                event_probs[event_ticker] = {"error": str(e)}
+        # Parallelize fetching orderbooks for multiple events
+        with ThreadPoolExecutor(max_workers=min(len(event_tickers), 10)) as executor:
+            future_to_ticker = {
+                executor.submit(get_top_of_book_post_probs, event_ticker): event_ticker
+                for event_ticker in event_tickers
+            }
+            
+            for future in future_to_ticker:
+                event_ticker = future_to_ticker[future]
+                try:
+                    prob_result = future.result()
+                    event_probs[event_ticker] = prob_result
+                except Exception as e:
+                    if debug:
+                        print(f"⚠️ Error fetching {event_ticker}: {e}")
+                    # Store error result
+                    event_probs[event_ticker] = {"error": str(e)}
+    else:
+        if debug:
+            print("Kalshi event tickers not available; running moneylines in Unabated-only mode (no orderbooks).")
     
-    # Build moneylines table rows
-    moneyline_rows = []
+    # Build moneylines table rows (game-side level: 2 rows per game)
+    moneyline_rows: List[Dict[str, Any]] = []
     
     for i, game in enumerate(games):
         event_ticker = game_to_event.get(i)
@@ -126,35 +130,49 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         home_ev_top = (home_fair - yes_be_top_home) * 100.0 if (home_fair is not None and yes_be_top_home is not None) else None
         home_ev_topm1 = (home_fair - yes_be_topm1_home) * 100.0 if (home_fair is not None and yes_be_topm1_home is not None) else None
         
-        moneyline_rows.append({
+        base = {
             "game_date": game.get("game_date", "N/A"),
             "event_start": game.get("event_start"),
             "away_roto": game.get("away_roto"),
-            "away_team": game.get("away_team_name", "N/A"),
-            "home_team": game.get("home_team_name", "N/A"),
-            "away_fair": away_fair,
-            "home_fair": home_fair,
-            "event_ticker": event_ticker or "N/A",
-            "away_ticker": game.get("away_kalshi_ticker") or "N/A",
-            "home_ticker": game.get("home_kalshi_ticker") or "N/A",
-            "away_top_prob": yes_be_top_away,
-            "away_topm1_prob": yes_be_topm1_away,
-            "home_top_prob": yes_be_top_home,
-            "home_topm1_prob": yes_be_topm1_home,
-            "away_top_liq": yes_bid_top_liq_away,
-            "away_topm1_liq": yes_bid_top_p1_liq_away,
-            "home_top_liq": yes_bid_top_liq_home,
-            "home_topm1_liq": yes_bid_top_p1_liq_home,
-            "away_top_price_cents": yes_bid_top_c_away,
-            "home_top_price_cents": yes_bid_top_c_home,
-            "away_ev_top": away_ev_top,
-            "away_ev_topm1": away_ev_topm1,
-            "home_ev_top": home_ev_top,
-            "home_ev_topm1": home_ev_topm1,
+            "event_ticker": event_ticker or None,
+            "market": "ML",
+            "line": None,
+        }
+
+        # Away side row
+        moneyline_rows.append({
+            **base,
+            "side": "AWAY",
+            "team": game.get("away_team_name", "N/A"),
+            "kalshi_prob": yes_be_top_away,
+            "kalshi_liq": yes_bid_top_liq_away,
+            "kalshi_price_cents": yes_bid_top_c_away,
+            "pinnacle_prob": away_fair,
+            "ev": away_ev_top,
+            "market_ticker": game.get("away_kalshi_ticker"),
+        })
+
+        # Home side row
+        moneyline_rows.append({
+            **base,
+            "side": "HOME",
+            "team": game.get("home_team_name", "N/A"),
+            "kalshi_prob": yes_be_top_home,
+            "kalshi_liq": yes_bid_top_liq_home,
+            "kalshi_price_cents": yes_bid_top_c_home,
+            "pinnacle_prob": home_fair,
+            "ev": home_ev_top,
+            "market_ticker": game.get("home_kalshi_ticker"),
         })
     
-    # Sort by ROTO ascending
-    moneyline_rows.sort(key=lambda x: (x.get('away_roto') is None, x.get('away_roto') or 0))
+    # Sort by ROTO ascending, then side (AWAY first), then time
+    side_rank = {"AWAY": 0, "HOME": 1}
+    moneyline_rows.sort(key=lambda x: (
+        x.get('away_roto') is None,
+        x.get('away_roto') or 0,
+        x.get('event_start') or "",
+        side_rank.get(x.get("side"), 9),
+    ))
     
     return moneyline_rows
 

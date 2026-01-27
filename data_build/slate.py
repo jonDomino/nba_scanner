@@ -299,8 +299,8 @@ def get_today_games_with_fairs_and_kalshi_tickers() -> List[Dict[str, Any]]:
     if not games:
         return []
     
-    # Step B: Get Kalshi tickers
-    tickers = get_all_nba_kalshi_tickers()
+    # Step B: Get Kalshi tickers (may be unavailable locally if private key not provided)
+    tickers = get_all_nba_kalshi_tickers() or []
     
     # Step C: Build ticker lookup
     ticker_lookup = build_ticker_lookup(tickers)
@@ -341,45 +341,61 @@ def get_today_games_with_fairs_and_kalshi_tickers() -> List[Dict[str, Any]]:
             if kalshi_code:
                 team_id_to_kalshi_code[team_id] = kalshi_code
         
-        if len(team_id_to_kalshi_code) < 2:
-            # Can't map teams to codes, skip
-            continue
+        # If we can't map teams to Kalshi codes, we can still return the game in Unabated-only mode.
         
-        # Find matching matchup in ticker lookup
-        kalshi_codes = list(team_id_to_kalshi_code.values())
-        matchup_codes = (kalshi_codes[0], kalshi_codes[1])
-        matchup_data = ticker_lookup.get(matchup_codes)
-        
-        if not matchup_data:
-            # Try swapped
-            matchup_codes = (kalshi_codes[1], kalshi_codes[0])
+        matchup_data = None
+        if len(team_id_to_kalshi_code) >= 2 and ticker_lookup:
+            # Find matching matchup in ticker lookup
+            kalshi_codes = list(team_id_to_kalshi_code.values())
+            matchup_codes = (kalshi_codes[0], kalshi_codes[1])
             matchup_data = ticker_lookup.get(matchup_codes)
-        
-        if matchup_data:
-            # Found matching tickers - extract event ticker from first ticker
-            first_ticker = list(matchup_data.values())[0] if matchup_data else None
-            if first_ticker:
-                # Derive event ticker: remove final -TEAM suffix
-                parts = first_ticker.split("-")
-                if len(parts) >= 3:
-                    event_ticker = "-".join(parts[:-1])
-                    
-                    # Parse event ticker to get canonical away/home codes
-                    try:
-                        parsed = parse_event_ticker(event_ticker)
-                        kalshi_away_code = parsed["away_code"]
-                        kalshi_home_code = parsed["home_code"]
+            
+            if not matchup_data:
+                # Try swapped
+                matchup_codes = (kalshi_codes[1], kalshi_codes[0])
+                matchup_data = ticker_lookup.get(matchup_codes)
+            
+            if matchup_data:
+                # Found matching tickers - extract event ticker from first ticker
+                first_ticker = list(matchup_data.values())[0] if matchup_data else None
+                if first_ticker:
+                    # Derive event ticker: remove final -TEAM suffix
+                    parts = first_ticker.split("-")
+                    if len(parts) >= 3:
+                        event_ticker = "-".join(parts[:-1])
                         
-                        # Get away/home tickers based on canonical codes
-                        away_ticker = matchup_data.get(kalshi_away_code)
-                        home_ticker = matchup_data.get(kalshi_home_code)
-                    except (ValueError, KeyError):
-                        pass
+                        # Parse event ticker to get canonical away/home codes
+                        try:
+                            parsed = parse_event_ticker(event_ticker)
+                            kalshi_away_code = parsed["away_code"]
+                            kalshi_home_code = parsed["home_code"]
+                            
+                            # Get away/home tickers based on canonical codes
+                            away_ticker = matchup_data.get(kalshi_away_code)
+                            home_ticker = matchup_data.get(kalshi_home_code)
+                        except (ValueError, KeyError):
+                            pass
         
-        # Now determine true away/home using Kalshi event ticker
-        away_home_info = determine_away_home_from_kalshi(
-            teams_by_id, fairs_by_team_id, xref, event_ticker, game.get("event_teams_raw")
-        )
+        # Determine away/home:
+        # - If Kalshi event ticker exists: use canonical ordering
+        # - Else: fall back to a deterministic Unabated-only ordering (by team name)
+        if event_ticker:
+            away_home_info = determine_away_home_from_kalshi(
+                teams_by_id, fairs_by_team_id, xref, event_ticker, game.get("event_teams_raw")
+            )
+        else:
+            # Unabated-only fallback: order by team name
+            pairs = sorted([(name, tid) for tid, name in teams_by_id.items()], key=lambda x: (x[0] or "", x[1]))
+            (away_name, away_id), (home_name, home_id) = pairs[0], pairs[1]
+            away_home_info = {
+                "away_team_id": away_id,
+                "home_team_id": home_id,
+                "away_team_name": away_name,
+                "home_team_name": home_name,
+                "away_fair": fairs_by_team_id.get(away_id),
+                "home_fair": fairs_by_team_id.get(home_id),
+                "away_roto": None,
+            }
         
         # Consistency check and debug for TORBOS
         if event_ticker and away_home_info.get("away_team_id") and away_home_info.get("home_team_id"):

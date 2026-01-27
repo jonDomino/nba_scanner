@@ -1,0 +1,20 @@
+# Local credentials (DO NOT COMMIT)
+# Copy this file to `creds_local.txt` (preferred) or `creds.txt` (both are gitignored)
+#
+# Format:
+#   KEY=VALUE
+# - Quote values if they contain spaces
+# - For multi-line PEMs, either:
+#     - paste with \n escapes inside quotes, OR
+#     - reference a file with @relative/path.pem
+#
+# Required for live local dashboard:
+UNABATED_API_KEY="your_unabated_api_key_here"
+KALSHI_API_KEY_ID="your_kalshi_api_key_id_here"
+
+# Option A (recommended): reference your existing pem file
+KALSHI_PRIVATE_KEY_PEM=@kalshi_private_key.pem
+
+# Option B: inline PEM using \n escapes (single line)
+#KALSHI_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+

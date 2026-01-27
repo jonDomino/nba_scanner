@@ -111,12 +111,19 @@ def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Opt
     if not isinstance(market_lines, dict):
         return None
     
-    # Find ALL Unabated market source (ms49) keys
-    ms49_keys = [k for k in market_lines.keys() if ":ms49:" in k]
-    
-    if not ms49_keys:
+    # Find market source keys. Prefer configured msid, but fall back if that msid
+    # is not present in this particular event payload.
+    preferred_msid = getattr(config, "UNABATED_MARKET_SOURCE_ID", 49)
+    fallback_msids = [preferred_msid, 70, 58, 7, 49]  # Pinnacle variants, then Sharp Book Price, then Unabated
+    ms_keys = []
+    for msid in fallback_msids:
+        ms_token = f":ms{msid}:"
+        ms_keys = [k for k in market_lines.keys() if ms_token in k]
+        if ms_keys:
+            break
+    if not ms_keys:
         if DEBUG_TOTALS:
-            print(f"    ⚠️ No ms49 keys found for event")
+            print(f"    ⚠️ No ms{msid} keys found for event")
         return None
     
     # DEBUG: Print event structure
@@ -134,12 +141,12 @@ def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Opt
         print(f"\n  [DEBUG] Unabated Totals Extraction:")
         print(f"    Event: {event.get('eventStart')}")
         print(f"    Event teams: {team_names}")
-        print(f"    ms49_keys found: {len(ms49_keys)}")
-        print(f"    ms49_key samples: {ms49_keys[:3]}")
+        print(f"    ms{msid}_keys found: {len(ms_keys)}")
+        print(f"    ms{msid}_key samples: {ms_keys[:3]}")
         
         # Print first ms49 block structure
-        if ms49_keys:
-            first_ms49 = market_lines[ms49_keys[0]]
+        if ms_keys:
+            first_ms49 = market_lines[ms_keys[0]]
             if isinstance(first_ms49, dict):
                 print(f"    First ms49_block keys: {list(first_ms49.keys())[:10]}")
                 if "bt3" in first_ms49:
@@ -159,7 +166,7 @@ def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Opt
     
     # Totals are typically in bt3 (bt1=moneyline, bt2=spread, bt3=total)
     # Totals are game-level (not per-team), but might appear in any ms49 block
-    for ms49_key in ms49_keys:
+    for ms49_key in ms_keys:
         ms49_block = market_lines[ms49_key]
         if not isinstance(ms49_block, dict):
             continue

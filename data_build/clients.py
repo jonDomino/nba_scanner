@@ -18,7 +18,11 @@ class UnabatedClient:
     def __init__(self, api_key: str = None):
         self.api_key = api_key or config.UNABATED_API_KEY
         if not self.api_key:
-            raise ValueError("Unabated API key not configured")
+            raise ValueError(
+                "Unabated API key not configured. "
+                "For local runs, set UNABATED_API_KEY in creds_local.txt/creds.txt (recommended), "
+                "secrets_local.py, or environment variables."
+            )
     
     def fetch_snapshot(self) -> Dict[str, Any]:
         """Fetch Unabated game odds snapshot."""
@@ -50,30 +54,9 @@ class KalshiClient:
         1. Environment variables (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PEM) - for Streamlit Cloud
         2. Local files (kalshi_api_key_id.txt, kalshi_private_key.pem) - for local development
         """
-        import os
-        
-        # Try environment variables first (Streamlit Cloud)
-        api_key_id = os.getenv("KALSHI_API_KEY_ID")
-        private_key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
-        
-        if api_key_id and private_key_pem:
-            return api_key_id.strip(), private_key_pem
-        
-        # Fall back to local files (local development)
-        try:
-            with open(config.API_KEY_ID_FILE, "r") as f:
-                api_key_id = f.read().strip()
-            
-            with open(config.PRIVATE_KEY_FILE, "r") as f:
-                private_key_pem = f.read()
-            
-            return api_key_id, private_key_pem
-        except FileNotFoundError as e:
-            raise FileNotFoundError(
-                f"Missing Kalshi credentials. "
-                f"Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PEM environment variables, "
-                f"or provide files: {e.filename}"
-            )
+        # Delegate to the shared loader (supports env vars, creds.txt, and local files)
+        from utils.kalshi_api import load_creds
+        return load_creds()
     
     def _sign_request(self, message: str) -> str:
         """Sign a message using RSA-PSS + SHA256."""

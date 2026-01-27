@@ -42,7 +42,11 @@ def fetch_unabated_snapshot() -> Dict[str, Any]:
     Fetch Unabated game odds snapshot.
     """
     if not config.UNABATED_API_KEY:
-        raise ValueError("Unabated API key not configured")
+        raise ValueError(
+            "Unabated API key not configured. "
+            "For local runs, set UNABATED_API_KEY in one of: "
+            "creds_local.txt/creds.txt (recommended), secrets_local.py, or environment variables."
+        )
     
     url = f"{config.UNABATED_PROD_URL}?x-api-key={config.UNABATED_API_KEY}"
     

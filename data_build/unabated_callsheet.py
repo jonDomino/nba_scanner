@@ -81,24 +81,31 @@ def extract_unabated_moneylines_by_team_id(
     if not isinstance(event_teams, dict):
         return {}
     
-    # Find ALL Unabated market source (ms49) keys
-    ms49_keys = [k for k in market_lines.keys() if ":ms49:" in k]
-    
-    if not ms49_keys:
+    # Find market source keys. Prefer configured msid, but fall back if that msid
+    # is not present in this particular event payload.
+    preferred_msid = getattr(config, "UNABATED_MARKET_SOURCE_ID", 49)
+    fallback_msids = [preferred_msid, 70, 58, 7, 49]  # Pinnacle variants, then Sharp Book Price, then Unabated
+    ms_keys = []
+    for msid in fallback_msids:
+        ms_token = f":ms{msid}:"
+        ms_keys = [k for k in market_lines.keys() if ms_token in k]
+        if ms_keys:
+            break
+    if not ms_keys:
         return {}
     
     # Store prices by team_id (not by assumed away/home)
     prices_by_team_id = {}
     
-    # Iterate through all ms49 blocks
-    for ms49_key in ms49_keys:
-        ms49_block = market_lines[ms49_key]
-        if not isinstance(ms49_block, dict):
+    # Iterate through all ms{msid} blocks
+    for ms_key in ms_keys:
+        ms_block = market_lines[ms_key]
+        if not isinstance(ms_block, dict):
             continue
         
         # Parse side index from key prefix (e.g., "si1:ms49:an0" -> side_idx = 1)
         try:
-            parts = ms49_key.split(":")
+            parts = ms_key.split(":")
             side_token = parts[0]  # "si1"
             if side_token.startswith("si") and len(side_token) > 2:
                 side_idx = int(side_token[2:])  # Extract "1" from "si1"
@@ -117,7 +124,7 @@ def extract_unabated_moneylines_by_team_id(
             continue
         
         # Get bt1 line from this ms49 block
-        bt1_line = ms49_block.get("bt1")
+        bt1_line = ms_block.get("bt1")
         if bt1_line is None or not isinstance(bt1_line, dict):
             continue
         

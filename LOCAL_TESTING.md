@@ -28,12 +28,19 @@ pip install -r requirements.txt
 
 For local testing, you need credentials. Options:
 
-**Option A: Use local files (easiest for testing)**
+**Option A: Use a single creds file (recommended)**
+- Copy `creds.txt.example` → `creds_local.txt` (preferred) or `creds.txt`
+- Fill in:
+  - `UNABATED_API_KEY`
+  - `KALSHI_API_KEY_ID`
+  - `KALSHI_PRIVATE_KEY_PEM` (either `@kalshi_private_key.pem` or inline with `\n` escapes)
+
+**Option B: Use local files**
 - `kalshi_api_key_id.txt` - Your Kalshi API key ID
 - `kalshi_private_key.pem` - Your Kalshi private key (PEM format)
 - Create `secrets_local.py` with `UNABATED_API_KEY = "your_key"`
 
-**Option B: Use environment variables**
+**Option C: Use environment variables**
 ```bash
 # PowerShell (Windows)
 $env:KALSHI_API_KEY_ID = "your_key_id"

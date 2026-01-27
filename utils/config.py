@@ -4,6 +4,7 @@ API keys should be set via environment variables or local secrets file.
 """
 
 import os
+from utils.creds_loader import load_creds_file
 
 # Try to load from local secrets file (gitignored) if it exists
 try:
@@ -28,7 +29,19 @@ API_KEY_ID_FILE = "kalshi_api_key_id.txt"
 PRIVATE_KEY_FILE = "kalshi_private_key.pem"   
 
 # Unabated API (environment variable or local secrets file)
-UNABATED_API_KEY = os.getenv("UNABATED_API_KEY") or (_UNA_KEY if _USE_LOCAL_SECRETS else "") 
+_una_from_env = os.getenv("UNABATED_API_KEY") or (_UNA_KEY if _USE_LOCAL_SECRETS else "")
+if _una_from_env:
+    UNABATED_API_KEY = _una_from_env
+else:
+    # Local fallback: creds_local.txt / creds.txt in project root
+    UNABATED_API_KEY = load_creds_file().get("UNABATED_API_KEY", "")
+
+# Unabated market source id (msid) used when extracting book pricing from the snapshot.
+# NOTE: This is intentionally hard-coded (no env var). Change this value to switch books.
+# - Unabated: ms49
+# - Pinnacle - 3838: ms70
+# - Pinnacle - Delayed: ms58
+UNABATED_MARKET_SOURCE_ID = 70
 
 # Trading constants
 MAX_BUDGET_DOLLARS = 50.0
