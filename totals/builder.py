@@ -20,6 +20,7 @@ User-facing: Display "price to get exposure to Over/Under X.Y".
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
+import math
 
 from data_build.unabated_callsheet import get_team_name
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
@@ -33,6 +34,11 @@ from utils.kalshi_api import load_creds
 
 # Debug flag
 DEBUG_TOTALS = True
+
+# Pinnacle alias in Unabated snapshot for totals alt lines
+PINNACLE_TOTALS_MSIDS = [7]  # ms7 = "Sharp Book Price" (alias for Pinnacle)
+PINNACLE_TOTALS_OVERROUND = 1.034  # per user: sum of implied probs per (over, under) pair
+STRIKE_MATCH_TOL = 1e-6
 
 
 def parse_total_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[float]]:
@@ -75,7 +81,7 @@ def parse_total_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[floa
         strike = float(strike_bucket)
         
         if DEBUG_TOTALS:
-            print(f"    ✅ Parsed ticker: {ticker} → direction={direction}, strike={strike}")
+            print(f"    OK Parsed ticker: {ticker} -> direction={direction}, strike={strike}")
         
         return (direction, strike)
     
@@ -88,11 +94,227 @@ def parse_total_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[floa
         strike = float(strike_bucket)
         
         if DEBUG_TOTALS:
-            print(f"    ✅ Parsed ticker: {ticker} → strike={strike} (no direction)")
+            print(f"    OK Parsed ticker: {ticker} -> strike={strike} (no direction)")
         
         return (None, strike)
     
     return (None, None)
+
+
+def american_to_prob(american_odds: int) -> Optional[float]:
+    """Convert American odds to implied probability (vig-included)."""
+    try:
+        o = int(american_odds)
+    except Exception:
+        return None
+    if o == 0:
+        return None
+    if o < 0:
+        return (-o) / ((-o) + 100.0)
+    return 100.0 / (o + 100.0)
+
+
+def prob_to_american(p: float) -> Optional[int]:
+    """Convert probability (0,1) to American odds (rounded)."""
+    try:
+        p = float(p)
+    except Exception:
+        return None
+    if p <= 0.0 or p >= 1.0:
+        return None
+    if p >= 0.5:
+        odds = - (100.0 * p) / (1.0 - p)
+    else:
+        odds = (100.0 * (1.0 - p)) / p
+    return int(round(odds))
+
+
+def canonicalize_kalshi_strike(strike: Optional[float]) -> Optional[float]:
+    """
+    Canonical Kalshi strike always ends in .5 (per user).
+    If strike is an integer or ends with .0, add 0.5.
+    """
+    if strike is None:
+        return None
+    try:
+        x = float(strike)
+    except Exception:
+        return None
+    if abs(x - round(x)) < 1e-9:
+        return float(round(x) + 0.5)
+    if abs((x * 2.0) - round(x * 2.0)) < 1e-9:
+        # Already on a 0.5 grid (or other half increments)
+        return x
+    return x
+
+
+def _extract_pinnacle_totals_alt_lines_ms7(event: Dict[str, Any]) -> Dict[float, Dict[str, Any]]:
+    """
+    Extract totals alt lines from Unabated snapshot using ms7 blocks.
+
+    Returns:
+      dict points -> {
+        "over_american": int|None,
+        "under_american": int|None,
+        "over_prob": float|None,
+        "under_prob": float|None,
+        "estimated_other_side": bool
+      }
+    """
+    market_lines = event.get("gameOddsMarketSourcesLines", {})
+    if not isinstance(market_lines, dict):
+        return {}
+
+    # Collect all ms7 blocks
+    ms_keys = [k for k in market_lines.keys() if isinstance(k, str) and ":ms7:" in k]
+    if not ms_keys:
+        return {}
+
+    prices_by_points: Dict[float, List[int]] = {}
+
+    def add_price(points: Optional[float], american: Optional[int]) -> None:
+        if points is None or american is None:
+            return
+        prices_by_points.setdefault(points, [])
+        if american not in prices_by_points[points]:
+            prices_by_points[points].append(american)
+
+    main_points: Optional[float] = None
+
+    for k in ms_keys:
+        block = market_lines.get(k)
+        if not isinstance(block, dict):
+            continue
+        bt3 = block.get("bt3")
+        if not isinstance(bt3, dict):
+            continue
+
+        pts_raw = bt3.get("points") or bt3.get("total") or bt3.get("line") or bt3.get("value")
+        price_raw = bt3.get("americanPrice") or bt3.get("price") or bt3.get("unabatedPrice")
+
+        pts = None
+        if pts_raw is not None:
+            try:
+                pts = float(str(pts_raw).strip())
+            except Exception:
+                pts = None
+
+        price = None
+        if price_raw is not None:
+            try:
+                price = int(str(price_raw).strip())
+            except Exception:
+                price = None
+
+        if main_points is None and pts is not None:
+            main_points = pts
+
+        add_price(pts, price)
+
+        # Alternate lines
+        alt_lines = bt3.get("alternateLines")
+        if isinstance(alt_lines, list):
+            for alt in alt_lines:
+                if not isinstance(alt, dict):
+                    continue
+                a_pts_raw = alt.get("points") or alt.get("total") or alt.get("line") or alt.get("value")
+                a_price_raw = alt.get("americanPrice") or alt.get("price") or alt.get("unabatedPrice")
+                a_pts = None
+                if a_pts_raw is not None:
+                    try:
+                        a_pts = float(str(a_pts_raw).strip())
+                    except Exception:
+                        a_pts = None
+                a_price = None
+                if a_price_raw is not None:
+                    try:
+                        a_price = int(str(a_price_raw).strip())
+                    except Exception:
+                        a_price = None
+                add_price(a_pts, a_price)
+
+    if not prices_by_points:
+        return {}
+
+    # Pair over/under at each points using heuristic + overround estimation if needed
+    out: Dict[float, Dict[str, Any]] = {}
+    for pts, prices in prices_by_points.items():
+        # Use first two unique prices
+        unique_prices = prices[:2]
+        estimated = False
+
+        if len(unique_prices) == 1:
+            estimated = True
+            one = unique_prices[0]
+            p_one = american_to_prob(one)
+            other = None
+            p_other = None
+            if p_one is not None:
+                p_other = PINNACLE_TOTALS_OVERROUND - p_one
+                other = prob_to_american(p_other) if (p_other is not None and 0.0 < p_other < 1.0) else None
+            unique_prices = [one, other]  # type: ignore[list-item]
+
+        a, b = unique_prices[0], unique_prices[1]
+
+        # Decide which is OVER vs UNDER.
+        # Heuristic: for pts > main_points, OVER is cheaper (abs smaller). For pts < main_points, OVER is more expensive (abs larger).
+        over_american = None
+        under_american = None
+
+        if a is None and b is None:
+            continue
+        if a is None:
+            a, b = b, a
+        if b is None:
+            # Keep as over, estimate under already done above (or still missing)
+            over_american = a
+            under_american = b
+        else:
+            cheaper = a if abs(a) < abs(b) else b
+            expensive = b if cheaper == a else a
+
+            if main_points is None:
+                over_american, under_american = cheaper, expensive
+            else:
+                if pts > main_points:
+                    over_american, under_american = cheaper, expensive
+                elif pts < main_points:
+                    over_american, under_american = expensive, cheaper
+                else:
+                    over_american, under_american = cheaper, expensive
+
+        over_prob = american_to_prob(over_american) if over_american is not None else None
+        under_prob = american_to_prob(under_american) if under_american is not None else None
+
+        out[pts] = {
+            "over_american": over_american,
+            "under_american": under_american,
+            "over_prob": over_prob,
+            "under_prob": under_prob,
+            "estimated_other_side": bool(estimated),
+        }
+
+    return out
+
+
+def _team_names_for_event(event: Dict[str, Any], teams: Dict[str, Any]) -> List[str]:
+    """Helper for fallback event matching: extract team display names from an Unabated event."""
+    out: List[str] = []
+    event_teams = event.get("eventTeams", {})
+    if not isinstance(event_teams, dict):
+        return out
+    for _, team_info in event_teams.items():
+        if not isinstance(team_info, dict):
+            continue
+        team_id = team_info.get("id")
+        if team_id is None:
+            continue
+        team_dict = teams.get(str(team_id)) or teams.get(team_id) or {}
+        if isinstance(team_dict, dict):
+            name = team_dict.get("name") or team_dict.get("teamName")
+            if isinstance(name, str) and name.strip():
+                out.append(name.strip())
+    return out
 
 
 def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -123,7 +345,7 @@ def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Opt
             break
     if not ms_keys:
         if DEBUG_TOTALS:
-            print(f"    ⚠️ No ms{msid} keys found for event")
+            print(f"    WARN No ms{msid} keys found for event")
         return None
     
     # DEBUG: Print event structure
@@ -227,11 +449,11 @@ def extract_unabated_totals(event: Dict[str, Any], teams: Dict[str, Any]) -> Opt
         unique_totals = set(bt3_data['total'] for bt3_data in all_bt3_totals)
         if len(unique_totals) > 1:
             if DEBUG_TOTALS:
-                print(f"    ⚠️ WARNING: Multiple different totals found: {unique_totals}")
+                print(f"    WARN Multiple different totals found: {unique_totals}")
                 print(f"    Using first one ({all_bt3_totals[0]['total']})")
         else:
             if DEBUG_TOTALS:
-                print(f"    ✅ All ms49 blocks have same total: {all_bt3_totals[0]['total']}")
+                print(f"    OK All ms blocks have same total: {all_bt3_totals[0]['total']}")
         
         # Return first bt3 total (should be same across all ms49 blocks if game-level)
         return {
@@ -307,7 +529,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
         api_key_id, private_key_pem = load_creds()
     except Exception as e:
         if DEBUG_TOTALS:
-            print(f"❌ Failed to load Kalshi credentials: {e}")
+            print(f"ERR Failed to load Kalshi credentials: {e}")
         return []
     
     # Convert KXNBAGAME event ticker to KXNBATOTAL event ticker
@@ -325,7 +547,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
     
     if not markets:
         if DEBUG_TOTALS:
-            print(f"  ⚠️ No markets found for totals event {total_event_ticker}")
+            print(f"  WARN No markets found for totals event {total_event_ticker}")
         return []
     
     # DEBUG: Print market structure for first 2 markets
@@ -423,7 +645,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
             strike = strike_from_ticker
             direction_from_strike = direction_from_ticker
             if DEBUG_TOTALS:
-                print(f"  ✅ Parsed strike from ticker: {market_ticker} → {strike} ({direction_from_strike or 'no direction'})")
+                print(f"  OK Parsed strike from ticker: {market_ticker} -> {strike} ({direction_from_strike or 'no direction'})")
         
         # SOURCE 2: Parse strike from subtitle (SECONDARY - Fix A)
         if strike is None:
@@ -441,7 +663,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                         elif "under" in subtitle_lower:
                             direction_from_strike = "UNDER"
                         if DEBUG_TOTALS:
-                            print(f"  ✅ Parsed strike from subtitle: {subtitle} → {strike}")
+                            print(f"  OK Parsed strike from subtitle: {subtitle} -> {strike}")
                     except (ValueError, AttributeError):
                         pass
         
@@ -462,7 +684,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                         elif "under" in yes_title_lower:
                             direction_from_strike = "UNDER"
                         if DEBUG_TOTALS:
-                            print(f"  ✅ Parsed strike from yes_title: {yes_title} → {strike}")
+                            print(f"  OK Parsed strike from yes_title: {yes_title} -> {strike}")
                     except (ValueError, AttributeError):
                         pass
             
@@ -478,7 +700,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                         elif "under" in no_title_lower:
                             direction_from_strike = "UNDER"
                         if DEBUG_TOTALS:
-                            print(f"  ✅ Parsed strike from no_title: {no_title} → {strike}")
+                            print(f"  OK Parsed strike from no_title: {no_title} -> {strike}")
                     except (ValueError, AttributeError):
                         pass
         
@@ -498,7 +720,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                     try:
                         strike = float(strike_candidate)
                         if DEBUG_TOTALS:
-                            print(f"  ✅ Parsed strike from product_metadata: {strike}")
+                            print(f"  OK Parsed strike from product_metadata: {strike}")
                     except (ValueError, TypeError):
                         pass
         
@@ -514,7 +736,7 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                 try:
                     strike = float(strike_candidate)
                     if DEBUG_TOTALS:
-                        print(f"  ✅ Parsed strike from dedicated field: {strike}")
+                        print(f"  OK Parsed strike from dedicated field: {strike}")
                 except (ValueError, TypeError):
                     pass
         
@@ -530,14 +752,14 @@ def discover_kalshi_totals_markets(event_ticker: str) -> List[Dict[str, Any]]:
                     elif "under" in title_lower:
                         direction_from_strike = "UNDER"
                     if DEBUG_TOTALS:
-                        print(f"  ✅ Parsed strike from title: {title_raw} → {strike}")
+                        print(f"  OK Parsed strike from title: {title_raw} -> {strike}")
                 except (ValueError, AttributeError):
                     pass
         
         # If strike still not found, skip this market
         if strike is None:
             if DEBUG_TOTALS:
-                print(f"  ⚠️ Could not parse strike from any source for: {market_ticker}")
+                print(f"  WARN Could not parse strike from any source for: {market_ticker}")
                 print(f"     title: {title_raw}")
                 print(f"     subtitle: {market.get('subtitle')}")
                 print(f"     yes_title: {market.get('yes_title') or market.get('yesTitle')}")
@@ -598,7 +820,7 @@ def select_closest_over_strikes(
     # For now, let's just use Over markets
     if not over_markets:
         if DEBUG_TOTALS:
-            print(f"  ⚠️ No Over markets found, available markets have directions: {[m.get('direction') for m in available_markets[:3]]}")
+            print(f"  WARN No Over markets found, available markets have directions: {[m.get('direction') for m in available_markets[:3]]}")
         # Fallback: use all markets (assume they're Over markets even if labeled differently)
         over_markets = available_markets
     
@@ -698,7 +920,7 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
         api_key_id, private_key_pem = load_creds()
     except Exception as e:
         if DEBUG_TOTALS:
-            print(f"❌ Failed to load Kalshi credentials: {e}")
+            print(f"ERR Failed to load Kalshi credentials: {e}")
         return []
     
     # Get Unabated snapshot for totals extraction (use provided or fetch)
@@ -711,10 +933,33 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
     from data_build.unabated_callsheet import extract_nba_games_today
     today_events = extract_nba_games_today(snapshot)
     
-    # Build event lookup by event_start
-    events_by_start = {event.get("eventStart"): event for event in today_events}
+    def _event_team_ids(ev: Dict[str, Any]) -> frozenset:
+        ids = set()
+        et = ev.get("eventTeams", {})
+        if isinstance(et, dict):
+            for _, info in et.items():
+                if isinstance(info, dict):
+                    tid = info.get("id")
+                    if tid is not None:
+                        try:
+                            ids.add(int(tid))
+                        except Exception:
+                            pass
+        return frozenset(ids)
+
+    # Build event lookup by (event_start, team_ids) to avoid collisions at same start time
+    events_by_key: Dict[Tuple[str, frozenset], Dict[str, Any]] = {}
+    for ev in today_events:
+        es = ev.get("eventStart")
+        if not es:
+            continue
+        key = (es, _event_team_ids(ev))
+        # Keep first occurrence if duplicates (should be rare)
+        if key not in events_by_key:
+            events_by_key[key] = ev
     
-    totals_rows = []
+    # New schema: game-line-side level (2 rows per matched strike: OVER + UNDER)
+    totals_rows: List[Dict[str, Any]] = []
     
     for game in games:
         event_start = game.get("event_start")
@@ -731,7 +976,7 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
         
         if not away_team_name or not home_team_name:
             if DEBUG_TOTALS:
-                print(f"⚠️ Could not determine away/home teams for game")
+                print(f"WARN Could not determine away/home teams for game")
             continue
         
         if DEBUG_TOTALS:
@@ -739,11 +984,30 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
             print(f"Game: {away_team_name} @ {home_team_name} (ROTO {away_roto})")
             print(f"  event_start: {event_start}")
         
-        # Get Unabated event for totals extraction
-        unabated_event = events_by_start.get(event_start)
+        # Get Unabated event for totals extraction (match on eventStart + team_ids)
+        away_team_id = game.get("away_team_id")
+        home_team_id = game.get("home_team_id")
+        unabated_event = None
+        if away_team_id is not None and home_team_id is not None:
+            try:
+                key = (event_start, frozenset({int(away_team_id), int(home_team_id)}))
+                unabated_event = events_by_key.get(key)
+            except Exception:
+                unabated_event = None
+
+        # Fallback: match by eventStart + team names (slower, but safer than wrong event)
+        if not unabated_event:
+            target_names = {str(away_team_name).strip().lower(), str(home_team_name).strip().lower()}
+            for ev in today_events:
+                if ev.get("eventStart") != event_start:
+                    continue
+                ev_names = {n.strip().lower() for n in _team_names_for_event(ev, teams_dict)}
+                if target_names.issubset(ev_names):
+                    unabated_event = ev
+                    break
         if not unabated_event:
             if DEBUG_TOTALS:
-                print(f"  ⚠️ Could not find Unabated event for {event_start}")
+                print(f"  WARN Could not find Unabated event for {event_start}")
             continue
         
         # DEBUG: Verify event matching
@@ -760,30 +1024,20 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
             print(f"  [DEBUG] Matched Unabated event teams: {unabated_team_names}")
             print(f"  [DEBUG] Matched event keys: {list(unabated_event.keys())[:10]}")
         
-        # Extract totals consensus
-        totals_data = extract_unabated_totals(unabated_event, teams_dict)
-        
-        if not totals_data:
+        # Extract Pinnacle (ms7 Sharp Book Price) totals alt lines for this game
+        pinnacle_lines = _extract_pinnacle_totals_alt_lines_ms7(unabated_event)
+        if not pinnacle_lines:
             if DEBUG_TOTALS:
-                print(f"  ⚠️ Could not extract Unabated totals for game")
+                print("  WARN No Pinnacle(ms7) totals lines found for game")
             continue
-        
-        canonical_total = totals_data.get("total")
-        canonical_juice = totals_data.get("juice")
-        
-        if canonical_total is None:
-            if DEBUG_TOTALS:
-                print(f"  ⚠️ Missing consensus total - skipping game")
-            continue
-        
         if DEBUG_TOTALS:
-            print(f"  Unabated total: {canonical_total} (juice: {canonical_juice})")
-            print(f"  [DEBUG] Formatting consensus: {format_total_consensus_string(canonical_total, canonical_juice)}")
+            pts_sorted = sorted(pinnacle_lines.keys())
+            print(f"  Pinnacle(ms7) totals points: count={len(pts_sorted)} sample={pts_sorted[:10]}")
         
         # Discover Kalshi totals markets
         if not event_ticker:
             if DEBUG_TOTALS:
-                print(f"  ⚠️ No event ticker, skipping")
+                print(f"  WARN No event ticker, skipping")
             continue
         
         totals_markets = discover_kalshi_totals_markets(event_ticker)
@@ -797,46 +1051,63 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
         if not totals_markets:
             continue
         
-        # Enhanced debug logging
-        canonical_market_count = len([m for m in totals_markets if m.get("parsed_strike") is not None])
+        # Canonicalize Kalshi strikes to always end in .5, then inner-join with Pinnacle alt points
+        # (User requirement: show only where Kalshi and Pinnacle have the same strike)
+        kalshi_markets_by_strike: Dict[float, Dict[str, Any]] = {}
+        for m in totals_markets:
+            strike_raw = m.get("parsed_strike")
+            strike = canonicalize_kalshi_strike(strike_raw)
+            ticker = m.get("ticker")
+            if strike is None or not ticker:
+                continue
+            # Prefer "over" markets (Kalshi totals are typically Over markets with NO representing Under)
+            direction = (m.get("direction") or "").lower()
+            if direction and direction not in ["over", "total"]:
+                continue
+            # Keep first ticker per strike (stable)
+            if strike not in kalshi_markets_by_strike:
+                kalshi_markets_by_strike[strike] = m
+
+        if not kalshi_markets_by_strike:
+            continue
+
+        # Find matches within tolerance
+        pinnacle_points = sorted(pinnacle_lines.keys())
         if DEBUG_TOTALS:
-            print(f"\n  [DEBUG] Canonical POV Selection:")
-            print(f"    Unabated total: {canonical_total} (juice: {canonical_juice})")
-            print(f"    Canonical POV: Over (all totals markets are Over markets)")
-            print(f"    Totals markets found: {len(totals_markets)}")
-            print(f"    Markets with parsed strike: {canonical_market_count}")
-            if canonical_market_count == 0:
-                print(f"    ⚠️ ZERO markets with parsed strike - this is why game disappears")
-            # Show first few markets with parsing details
-            for m in totals_markets[:5]:
-                ticker = m.get("ticker", "N/A")
-                strike = m.get("parsed_strike", "N/A")
-                direction = m.get("direction", "N/A")
-                title = m.get("title", "N/A")
-                print(f"      - {ticker}")
-                print(f"        strike={strike}, direction={direction}, title={title[:50]}")
-        
-        # Select 2 closest Over strikes (canonical POV = Over)
-        selected_strikes = select_closest_over_strikes(
-            canonical_total, totals_markets, count=2
-        )
-        
-        if DEBUG_TOTALS:
-            print(f"  Selected {len(selected_strikes)} strike(s) for canonical POV (Over)")
-            if len(selected_strikes) == 0:
-                print(f"  ⚠️ Selection returned 0 strikes - game will be skipped")
-            for market in selected_strikes:
-                print(f"    - {market.get('ticker')} (strike={market.get('parsed_strike')})")
-        
-        if not selected_strikes:
+            k_strikes_sorted = sorted(kalshi_markets_by_strike.keys())
+            print(f"  Kalshi canonical strikes: count={len(k_strikes_sorted)} sample={k_strikes_sorted[:10]}")
+        matched: List[Tuple[float, float]] = []  # (kalshi_strike, pinnacle_points)
+        for k_strike in sorted(kalshi_markets_by_strike.keys()):
+            best = None
+            best_d = None
+            for p_pts in pinnacle_points:
+                d = abs(p_pts - k_strike)
+                if d <= STRIKE_MATCH_TOL and (best_d is None or d < best_d):
+                    best = p_pts
+                    best_d = d
+            if best is not None:
+                matched.append((k_strike, best))
+
+        if not matched:
+            if DEBUG_TOTALS:
+                print("  WARN No inner-join strikes between Kalshi and Pinnacle(ms7)")
+                # show closest distances for debugging
+                k_strikes_sorted = sorted(kalshi_markets_by_strike.keys())[:10]
+                p_pts_sorted = pinnacle_points[:10]
+                if k_strikes_sorted and p_pts_sorted:
+                    approx = []
+                    for ks in k_strikes_sorted:
+                        dmin = min(abs(pp - ks) for pp in p_pts_sorted)
+                        approx.append((ks, dmin))
+                    print(f"    closest deltas sample: {approx[:10]}")
             continue
         
         # Collect all unique market tickers we need to fetch
         unique_market_tickers = set()
-        for market in selected_strikes:
-            market_ticker = market.get("ticker")
-            if market_ticker:
-                unique_market_tickers.add(market_ticker)
+        for k_strike, _ in matched:
+            market = kalshi_markets_by_strike.get(k_strike)
+            if market and market.get("ticker"):
+                unique_market_tickers.add(market["ticker"])
         
         # Pre-fetch all orderbooks in parallel (if we have multiple tickers)
         if len(unique_market_tickers) > 1:
@@ -856,69 +1127,75 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
             except Exception:
                 pass  # Fall back to sequential fetching if parallel fails
         
-        # Build rows for canonical POV only (Over perspective)
-        for market in selected_strikes:
-            strike_value = market.get("parsed_strike")
-            if strike_value is None:
+        # Emit game-line-side rows
+        for k_strike, p_pts in matched:
+            market = kalshi_markets_by_strike.get(k_strike)
+            if not market:
                 continue
-            
             market_ticker = market.get("ticker")
             if not market_ticker:
                 continue
-            
-            # Get orderbook data for both sides (same market)
-            # Over exposure = YES bid, Under exposure = NO bid
-            over_orderbook_data = get_spread_orderbook_data(market_ticker, "YES")
-            under_orderbook_data = get_spread_orderbook_data(market_ticker, "NO")
-            
-            over_kalshi_prob = over_orderbook_data.get("tob_effective_prob")
-            over_kalshi_liq = over_orderbook_data.get("tob_liq")
-            over_kalshi_price_cents = over_orderbook_data.get("tob_bid_cents")  # YES bid price in cents
-            under_kalshi_prob = under_orderbook_data.get("tob_effective_prob")
-            under_kalshi_liq = under_orderbook_data.get("tob_liq")
-            under_kalshi_price_cents = under_orderbook_data.get("tob_bid_cents")  # NO bid price in cents
-            
-            # Format strike string (always "Over X.Y")
-            strike_str = format_total_strike_string(strike_value)
-            
-            # Format consensus string
-            consensus_str = format_total_consensus_string(canonical_total, canonical_juice)
-            
-            # Targeted debug
-            if DEBUG_TOTALS:
-                print(f"\n  [DEBUG] Totals row: {strike_str}")
-                print(f"    chosen market_ticker: {market_ticker}")
-                print(f"    market title: {market.get('title')}")
-                print(f"    parsed strike: {strike_value}")
-                print(f"    over best bid (cents): {over_orderbook_data.get('tob_bid_cents')}")
-                print(f"    over best bid liq: {over_orderbook_data.get('tob_liq')}")
-                print(f"    over effective prob: {over_kalshi_prob}")
-                print(f"    under best bid (cents): {under_orderbook_data.get('tob_bid_cents')}")
-                print(f"    under best bid liq: {under_orderbook_data.get('tob_liq')}")
-                print(f"    under effective prob: {under_kalshi_prob}")
-            
-            totals_rows.append({
+
+            # Kalshi: Over exposure = YES bid; Under exposure = NO bid
+            over_ob = get_spread_orderbook_data(market_ticker, "YES")
+            under_ob = get_spread_orderbook_data(market_ticker, "NO")
+
+            over_kalshi_prob = over_ob.get("tob_effective_prob")
+            under_kalshi_prob = under_ob.get("tob_effective_prob")
+            over_kalshi_liq = over_ob.get("tob_liq")
+            under_kalshi_liq = under_ob.get("tob_liq")
+            over_kalshi_price_cents = over_ob.get("tob_bid_cents")
+            under_kalshi_price_cents = under_ob.get("tob_bid_cents")
+
+            pin = pinnacle_lines.get(p_pts, {})
+            over_pin_prob = pin.get("over_prob")
+            under_pin_prob = pin.get("under_prob")
+
+            # Pinnacle POV inversion (like moneylines):
+            # - OVER row shows inverse of UNDER Pinnacle prob: 1 - P(UNDER)
+            # - UNDER row shows inverse of OVER Pinnacle prob: 1 - P(OVER)
+            over_pinnacle = (1.0 - under_pin_prob) if under_pin_prob is not None else over_pin_prob
+            under_pinnacle = (1.0 - over_pin_prob) if over_pin_prob is not None else under_pin_prob
+
+            over_ev = (over_pinnacle - over_kalshi_prob) * 100.0 if (over_pinnacle is not None and over_kalshi_prob is not None) else None
+            under_ev = (under_pinnacle - under_kalshi_prob) * 100.0 if (under_pinnacle is not None and under_kalshi_prob is not None) else None
+
+            away_code = game.get("kalshi_away_code") or ""
+            home_code = game.get("kalshi_home_code") or ""
+            game_code = f"{away_code}@{home_code}" if (away_code and home_code) else ""
+
+            base = {
                 "game_date": game.get("game_date"),
                 "event_start": game.get("event_start"),
                 "away_roto": game.get("away_roto"),
+                "game": game_code,
+                # Keep team names on the row for debugging/export, but the dashboard uses `game`.
                 "away_team": away_team_name,
                 "home_team": home_team_name,
-                "consensus": consensus_str,
-                "strike": strike_str,
-                "kalshi_ticker": market_ticker,
-                "kalshi_title": market.get("title"),
-                "unabated_total": canonical_total,
-                "over_kalshi_prob": over_kalshi_prob,
-                "over_kalshi_liq": over_kalshi_liq,
-                "over_kalshi_price_cents": over_kalshi_price_cents,  # YES bid price in cents for dollar liquidity calc
-                "under_kalshi_prob": under_kalshi_prob,
-                "under_kalshi_liq": under_kalshi_liq,
-                "under_kalshi_price_cents": under_kalshi_price_cents,  # NO bid price in cents for dollar liquidity calc
-                # Placeholders for future implementation
-                "over_fair": None,
-                "under_fair": None,
-                "over_ev": None,
-                "under_ev": None,
+                "market": "TOTALS",
+                "line": float(k_strike),
+            }
+
+            totals_rows.append({
+                **base,
+                "side": "OVER",
+                "kalshi_prob": over_kalshi_prob,
+                "kalshi_liq": over_kalshi_liq,
+                "kalshi_price_cents": over_kalshi_price_cents,
+                "pinnacle_prob": over_pinnacle,
+                "ev": over_ev,
+                "market_ticker": market_ticker,
+            })
+
+            totals_rows.append({
+                **base,
+                "side": "UNDER",
+                "kalshi_prob": under_kalshi_prob,
+                "kalshi_liq": under_kalshi_liq,
+                "kalshi_price_cents": under_kalshi_price_cents,
+                "pinnacle_prob": under_pinnacle,
+                "ev": under_ev,
+                "market_ticker": market_ticker,
             })
     
     return totals_rows

@@ -18,6 +18,7 @@ import re
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+import math
 
 from data_build.unabated_callsheet import get_today_games_with_fairs, utc_to_la_datetime, get_team_name
 from data_build.slate import get_today_games_with_fairs_and_kalshi_tickers
@@ -36,6 +37,230 @@ from utils.kalshi_api import load_creds
 
 # Debug flag
 DEBUG_SPREADS = True
+
+# Unabated msid for Pinnacle proxy (per user: use ms7 "Sharp Book Price" for alt lines)
+PINNACLE_SPREADS_MSID = 7
+PINNACLE_SPREADS_OVERROUND = 1.034  # sum of implied probs per (home, away) pair
+STRIKE_MATCH_TOL = 1e-6
+
+
+def canonicalize_kalshi_strike(strike: Optional[float]) -> Optional[float]:
+    """
+    Canonical Kalshi strike always ends in .5 (per user).
+    If strike is an integer or ends with .0, add 0.5.
+    """
+    if strike is None:
+        return None
+    try:
+        x = float(strike)
+    except Exception:
+        return None
+    if abs(x - round(x)) < 1e-9:
+        return float(round(x) + 0.5)
+    if abs((x * 2.0) - round(x * 2.0)) < 1e-9:
+        return x
+    return x
+
+
+def american_to_prob(american_odds: int) -> Optional[float]:
+    """Convert American odds to implied probability (vig-included)."""
+    try:
+        o = int(american_odds)
+    except Exception:
+        return None
+    if o == 0:
+        return None
+    if o < 0:
+        return (-o) / ((-o) + 100.0)
+    return 100.0 / (o + 100.0)
+
+
+def prob_to_american(p: float) -> Optional[int]:
+    """Convert probability (0,1) to American odds (rounded)."""
+    try:
+        p = float(p)
+    except Exception:
+        return None
+    if p <= 0.0 or p >= 1.0:
+        return None
+    if p >= 0.5:
+        odds = - (100.0 * p) / (1.0 - p)
+    else:
+        odds = (100.0 * (1.0 - p)) / p
+    return int(round(odds))
+
+
+def _estimate_missing_juice_from_known(
+    known_american: int,
+    overround_target: float = PINNACLE_SPREADS_OVERROUND
+) -> Optional[int]:
+    """
+    Estimate missing side American odds so that:
+      implied_prob(known) + implied_prob(missing) ~= overround_target
+    """
+    p_known = american_to_prob(known_american)
+    if p_known is None:
+        return None
+    p_missing = overround_target - p_known
+    # Clamp into (0,1) to avoid invalid conversions
+    p_missing = max(1e-6, min(1.0 - 1e-6, p_missing))
+    return prob_to_american(p_missing)
+
+
+def _extract_pinnacle_spreads_alt_lines_ms7(
+    event: Dict[str, Any],
+    home_team_id: Optional[int],
+    away_team_id: Optional[int],
+) -> Dict[float, Dict[str, Any]]:
+    """
+    Extract ms7 ("Sharp Book Price") alt spread lines and pair home/away for each magnitude.
+
+    Returns:
+      dict magnitude -> {
+        "home_american": int|None,
+        "away_american": int|None,
+        "home_prob": float|None,
+        "away_prob": float|None,
+        "estimated_other_side": bool
+      }
+    """
+    market_lines = event.get("gameOddsMarketSourcesLines", {})
+    if not isinstance(market_lines, dict):
+        return {}
+
+    event_teams = event.get("eventTeams", {})
+    if not isinstance(event_teams, dict):
+        return {}
+
+    ms_keys = [k for k in market_lines.keys() if isinstance(k, str) and f":ms{PINNACLE_SPREADS_MSID}:" in k]
+    if not ms_keys:
+        return {}
+
+    # team_id -> list of (spread_line, american)
+    per_team: Dict[int, List[Tuple[float, int]]] = {}
+
+    def add(team_id: int, spread_line: Optional[float], american: Optional[int]) -> None:
+        if spread_line is None or american is None:
+            return
+        per_team.setdefault(team_id, [])
+        per_team[team_id].append((float(spread_line), int(american)))
+
+    for k in ms_keys:
+        block = market_lines.get(k)
+        if not isinstance(block, dict):
+            continue
+
+        # Parse side index from key prefix (e.g., "si1:ms7:an0")
+        try:
+            parts = k.split(":")
+            side_token = parts[0]
+            if not (side_token.startswith("si") and len(side_token) > 2):
+                continue
+            side_idx = int(side_token[2:])
+        except Exception:
+            continue
+
+        team_info = event_teams.get(str(side_idx), {})
+        if not isinstance(team_info, dict):
+            continue
+        team_id = team_info.get("id")
+        if team_id is None:
+            continue
+
+        bt2 = block.get("bt2")
+        if not isinstance(bt2, dict):
+            continue
+
+        spread_raw = bt2.get("line") or bt2.get("spread") or bt2.get("value") or bt2.get("points")
+        price_raw = bt2.get("americanPrice") or bt2.get("price") or bt2.get("unabatedPrice") or bt2.get("juice")
+
+        spread = None
+        if spread_raw is not None:
+            try:
+                spread = float(str(spread_raw).strip())
+            except Exception:
+                spread = None
+        price = None
+        if price_raw is not None:
+            try:
+                price = int(str(price_raw).strip())
+            except Exception:
+                price = None
+
+        add(team_id, spread, price)
+
+        alt_lines = bt2.get("alternateLines")
+        if isinstance(alt_lines, list):
+            for alt in alt_lines:
+                if not isinstance(alt, dict):
+                    continue
+                a_spread_raw = alt.get("line") or alt.get("spread") or alt.get("value") or alt.get("points")
+                a_price_raw = alt.get("americanPrice") or alt.get("price") or alt.get("unabatedPrice") or alt.get("juice")
+                a_spread = None
+                if a_spread_raw is not None:
+                    try:
+                        a_spread = float(str(a_spread_raw).strip())
+                    except Exception:
+                        a_spread = None
+                a_price = None
+                if a_price_raw is not None:
+                    try:
+                        a_price = int(str(a_price_raw).strip())
+                    except Exception:
+                        a_price = None
+                add(team_id, a_spread, a_price)
+
+    if home_team_id is None or away_team_id is None:
+        return {}
+
+    home_lines = per_team.get(home_team_id, [])
+    away_lines = per_team.get(away_team_id, [])
+    if not home_lines and not away_lines:
+        return {}
+
+    # magnitude -> per-side american
+    paired: Dict[float, Dict[str, Any]] = {}
+
+    def upsert(side: str, spread_line: float, american: int) -> None:
+        mag = abs(float(spread_line))
+        # Only keep .5-grid lines if possible (but don't drop if not)
+        if mag in paired and paired[mag].get(f"{side}_american") is not None:
+            # Prefer first seen (stable), but overwrite if previous was None
+            return
+        paired.setdefault(mag, {"home_american": None, "away_american": None})
+        paired[mag][f"{side}_american"] = int(american)
+
+    for spread_line, american in home_lines:
+        upsert("home", spread_line, american)
+    for spread_line, american in away_lines:
+        upsert("away", spread_line, american)
+
+    out: Dict[float, Dict[str, Any]] = {}
+    for mag, d in paired.items():
+        h_am = d.get("home_american")
+        a_am = d.get("away_american")
+        estimated = False
+
+        # Fill missing side using overround rule
+        if h_am is None and a_am is not None:
+            h_am = _estimate_missing_juice_from_known(a_am, PINNACLE_SPREADS_OVERROUND)
+            estimated = True
+        if a_am is None and h_am is not None:
+            a_am = _estimate_missing_juice_from_known(h_am, PINNACLE_SPREADS_OVERROUND)
+            estimated = True
+
+        h_prob = american_to_prob(h_am) if h_am is not None else None
+        a_prob = american_to_prob(a_am) if a_am is not None else None
+
+        out[float(mag)] = {
+            "home_american": h_am,
+            "away_american": a_am,
+            "home_prob": h_prob,
+            "away_prob": a_prob,
+            "estimated_other_side": estimated,
+        }
+
+    return out
 
 
 def parse_spread_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[int]]:
@@ -607,22 +832,21 @@ def get_spread_orderbook_data(market_ticker: str, side_to_trade: str = "YES", or
         - crossed: Boolean indicating if +1c would cross
         - error: Error message if any
     """
-    try:
-        api_key_id, private_key_pem = load_creds()
-    except Exception as e:
-        return {
-            "tob_bid_cents": None,
-            "tob_effective_prob": None,
-            "tob_liq": None,
-            "tob_p1_bid_cents": None,
-            "tob_p1_effective_prob": None,
-            "tob_p1_liq": None,
-            "crossed": None,
-            "error": f"Failed to load credentials: {e}"
-        }
-    
-    # Use provided orderbook or fetch (with caching)
+    # Use provided orderbook (no creds needed) or fetch (with caching, requires creds)
     if orderbook is None:
+        try:
+            api_key_id, private_key_pem = load_creds()
+        except Exception as e:
+            return {
+                "tob_bid_cents": None,
+                "tob_effective_prob": None,
+                "tob_liq": None,
+                "tob_p1_bid_cents": None,
+                "tob_p1_effective_prob": None,
+                "tob_p1_liq": None,
+                "crossed": None,
+                "error": f"Failed to load credentials: {e}"
+            }
         orderbook = _fetch_orderbook_with_cache(market_ticker, api_key_id, private_key_pem)
     
     if not orderbook:
@@ -764,18 +988,17 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
         snapshot: Optional pre-fetched Unabated snapshot (if None, will fetch internally)
     
     Returns:
-        List of spread row dicts, each with:
-        - All game metadata (date, time, roto, teams, fairs)
-        - strike: Formatted strike string
-        - pov_team: "away" or "home"
-        - kalshi_ticker: Market ticker for this strike
-        - kalshi_title: Market title
-        - unabated_spread: Unabated canonical spread for POV team
-        - tob_effective_prob: Top-of-book break-even prob (after fees)
-        - tob_liq: Top-of-book liquidity
-        - tob_p1_effective_prob: Top-of-book+1c break-even prob (after fees)
-        - tob_p1_liq: Top-of-book+1c liquidity (None if theoretical)
-        - crossed: Boolean if +1c would cross
+        List of spread row dicts (2 rows per matched strike), using unified dashboard schema:
+        - game_date, event_start, away_roto, game (e.g., LAL@CLE)
+        - market="SPREADS"
+        - side: team abbreviation (home_code or away_code)
+        - line: signed spread from that team's POV (home: -X, away: +X)
+        - kalshi_prob: YES(top) after fees for home row; NO(top) after fees for away row
+        - kalshi_liq: liquidity at that top bid
+        - kalshi_price_cents: cents at that top bid
+        - pinnacle_prob: inverted opponent POV (home shows 1-away_prob, away shows 1-home_prob)
+        - ev: (pinnacle_prob - kalshi_prob) * 100
+        - market_ticker: Kalshi market ticker used (home POV market)
     """
     # Get today's games with all metadata (use provided or fetch)
     if games is None:
@@ -790,7 +1013,7 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
     xref_path = config.NBA_XREF_FILE
     xref = load_team_xref(xref_path)
     
-    # Load Kalshi credentials
+    # Load Kalshi credentials (optional: if missing, we can't build spread rows)
     try:
         api_key_id, private_key_pem = load_creds()
     except Exception as e:
@@ -808,27 +1031,33 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
     from data_build.unabated_callsheet import extract_nba_games_today
     today_events = extract_nba_games_today(snapshot)
     
-    # Build event lookup by event_start
-    events_by_start = {event.get("eventStart"): event for event in today_events}
+    # Build events list (we will match by eventStart + team ids to avoid collisions)
     
     spread_rows = []
     
+    def _find_unabated_event_for_game(event_start: str, away_team_id: Optional[int], home_team_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if not event_start:
+            return None
+        for ev in today_events:
+            if ev.get("eventStart") != event_start:
+                continue
+            ev_teams = ev.get("eventTeams", {})
+            if not isinstance(ev_teams, dict):
+                continue
+            ids = set()
+            for _, ti in ev_teams.items():
+                if isinstance(ti, dict) and ti.get("id") is not None:
+                    ids.add(ti.get("id"))
+            if away_team_id in ids and home_team_id in ids:
+                return ev
+        return None
+
     for game in games:
         event_start = game.get("event_start")
         if not event_start:
             continue
-        
-        # Get Unabated event for spread extraction
-        unabated_event = events_by_start.get(event_start)
-        if not unabated_event:
-            if DEBUG_SPREADS:
-                print(f"⚠️ Could not find Unabated event for {event_start}")
-            continue
-        
-        # Extract spreads by team_id
-        spreads_by_team_id = extract_unabated_spreads(unabated_event, teams_dict)
-        
-        # Get away/home team names directly from game (already determined by moneylines module)
+
+        # Get away/home team names directly from game (already determined by slate)
         away_team_name = game.get("away_team_name")
         home_team_name = game.get("home_team_name")
         
@@ -840,52 +1069,152 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
                 print(f"⚠️ Could not determine away/home teams for game")
             continue
         
-        # Get team IDs by matching names to Unabated event
-        away_team_id = None
-        home_team_id = None
-        
-        event_teams = unabated_event.get("eventTeams", {})
-        teams_by_id = {}
-        
-        # Build teams_by_id from event_teams
-        if isinstance(event_teams, dict):
-            for idx, team_info in event_teams.items():
-                if isinstance(team_info, dict):
-                    team_id = team_info.get("id")
-                    team_name = get_team_name(team_id, teams_dict) if team_id else None
-                    if team_id and team_name:
-                        teams_by_id[team_id] = team_name
-                        # Match to away/home names
-                        if team_name == away_team_name:
-                            away_team_id = team_id
-                        elif team_name == home_team_name:
-                            home_team_id = team_id
-        
-        # Get spreads for away/home (now returns dict with spread and juice)
-        away_spread_data = spreads_by_team_id.get(away_team_id) if away_team_id else None
-        home_spread_data = spreads_by_team_id.get(home_team_id) if home_team_id else None
-        
-        # Extract spread values (backward compatibility)
-        away_spread = away_spread_data.get("spread") if isinstance(away_spread_data, dict) else (away_spread_data if away_spread_data is not None else None)
-        home_spread = home_spread_data.get("spread") if isinstance(home_spread_data, dict) else (home_spread_data if home_spread_data is not None else None)
-        
-        # Extract juice
-        away_juice = away_spread_data.get("juice") if isinstance(away_spread_data, dict) else None
-        home_juice = home_spread_data.get("juice") if isinstance(home_spread_data, dict) else None
-        
-        if DEBUG_SPREADS:
-            print(f"\n{'='*60}")
-            print(f"Game: {away_team_name} @ {home_team_name}")
-            print(f"  Away spread (Unabated): {away_spread} (juice: {away_juice})")
-            print(f"  Home spread (Unabated): {home_spread} (juice: {home_juice})")
-        
-        # Discover Kalshi spread markets (with team name parsing)
+        away_team_id = game.get("away_team_id")
+        home_team_id = game.get("home_team_id")
+
+        # Find the correct Unabated event for this game
+        unabated_event = _find_unabated_event_for_game(event_start, away_team_id, home_team_id)
+        if not unabated_event:
+            if DEBUG_SPREADS:
+                print(f"⚠️ Could not find Unabated event for {event_start} (team match)")
+            continue
+
+        away_code = game.get("kalshi_away_code") or ""
+        home_code = game.get("kalshi_home_code") or ""
+        game_code = f"{away_code}@{home_code}" if (away_code and home_code) else ""
+
+        # Discover Kalshi spread markets (home POV)
         if not event_ticker:
             if DEBUG_SPREADS:
                 print(f"  ⚠️ No event ticker, skipping")
             continue
-        
+
         spread_markets = discover_kalshi_spread_markets(event_ticker, away_team_name, home_team_name, xref)
+        if not spread_markets:
+            continue
+
+        # Keep only home POV markets (per user: Kalshi spreads are home POV)
+        spread_markets = [m for m in spread_markets if (m.get("market_team_code") or "") == home_code]
+        if not spread_markets:
+            continue
+
+        # Kalshi markets by canonical strike
+        kalshi_by_strike: Dict[float, Dict[str, Any]] = {}
+        for m in spread_markets:
+            s_raw = m.get("parsed_strike")
+            s = canonicalize_kalshi_strike(s_raw)
+            t = m.get("ticker")
+            if s is None or not t:
+                continue
+            if s not in kalshi_by_strike:
+                kalshi_by_strike[s] = m
+
+        if not kalshi_by_strike:
+            continue
+
+        # Extract Pinnacle(ms7) alt spreads and pair home/away by magnitude
+        pinnacle_lines = _extract_pinnacle_spreads_alt_lines_ms7(unabated_event, home_team_id, away_team_id)
+        if not pinnacle_lines:
+            continue
+
+        # Match strikes within tolerance: Kalshi strike (positive) to Pinnacle magnitude
+        pinnacle_mags = sorted(pinnacle_lines.keys())
+        matched: List[Tuple[float, float]] = []  # (kalshi_strike, pinnacle_mag)
+        for k_strike in sorted(kalshi_by_strike.keys()):
+            best = None
+            best_d = None
+            for p_mag in pinnacle_mags:
+                d = abs(p_mag - k_strike)
+                if d <= STRIKE_MATCH_TOL and (best_d is None or d < best_d):
+                    best = p_mag
+                    best_d = d
+            if best is not None:
+                matched.append((k_strike, best))
+
+        if not matched:
+            continue
+
+        # Fetch orderbooks for matched tickers in parallel (one per strike)
+        tickers = [kalshi_by_strike[k].get("ticker") for k, _ in matched if kalshi_by_strike.get(k)]
+        orderbooks_by_ticker: Dict[str, Dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 10)) as executor:
+            future_to_ticker = {
+                executor.submit(_fetch_orderbook_with_cache, t, api_key_id, private_key_pem): t
+                for t in tickers
+                if t
+            }
+            for fut in future_to_ticker:
+                t = future_to_ticker[fut]
+                try:
+                    orderbooks_by_ticker[t] = fut.result() or {}
+                except Exception:
+                    orderbooks_by_ticker[t] = {}
+
+        for k_strike, p_mag in matched:
+            m = kalshi_by_strike.get(k_strike) or {}
+            market_ticker = m.get("ticker")
+            if not market_ticker:
+                continue
+            ob = orderbooks_by_ticker.get(market_ticker) or {}
+
+            # Kalshi: YES = home covers (wins by over X); NO = away covers (+X)
+            home_ob = get_spread_orderbook_data(market_ticker, "YES", orderbook=ob)
+            away_ob = get_spread_orderbook_data(market_ticker, "NO", orderbook=ob)
+
+            home_kalshi_prob = home_ob.get("tob_effective_prob")
+            away_kalshi_prob = away_ob.get("tob_effective_prob")
+            home_kalshi_liq = home_ob.get("tob_liq")
+            away_kalshi_liq = away_ob.get("tob_liq")
+            home_kalshi_price_cents = home_ob.get("tob_bid_cents")
+            away_kalshi_price_cents = away_ob.get("tob_bid_cents")
+
+            pin = pinnacle_lines.get(p_mag, {})
+            home_pin_prob = pin.get("home_prob")
+            away_pin_prob = pin.get("away_prob")
+
+            # Pinnacle POV inversion (like ML/TOTALS): show inverse of opponent price
+            home_pinnacle = (1.0 - away_pin_prob) if away_pin_prob is not None else home_pin_prob
+            away_pinnacle = (1.0 - home_pin_prob) if home_pin_prob is not None else away_pin_prob
+
+            home_ev = (home_pinnacle - home_kalshi_prob) * 100.0 if (home_pinnacle is not None and home_kalshi_prob is not None) else None
+            away_ev = (away_pinnacle - away_kalshi_prob) * 100.0 if (away_pinnacle is not None and away_kalshi_prob is not None) else None
+
+            base = {
+                "game_date": game.get("game_date"),
+                "event_start": game.get("event_start"),
+                "away_roto": game.get("away_roto"),
+                "game": game_code,
+                "market": "SPREADS",
+            }
+
+            # Home row: home_code -k_strike
+            spread_rows.append({
+                **base,
+                "side": home_code or "HOME",
+                "line": -float(k_strike),
+                "kalshi_prob": home_kalshi_prob,
+                "kalshi_liq": home_kalshi_liq,
+                "kalshi_price_cents": home_kalshi_price_cents,
+                "pinnacle_prob": home_pinnacle,
+                "ev": home_ev,
+                "market_ticker": market_ticker,
+            })
+
+            # Away row: away_code +k_strike (NO exposure)
+            spread_rows.append({
+                **base,
+                "side": away_code or "AWAY",
+                "line": float(k_strike),
+                "kalshi_prob": away_kalshi_prob,
+                "kalshi_liq": away_kalshi_liq,
+                "kalshi_price_cents": away_kalshi_price_cents,
+                "pinnacle_prob": away_pinnacle,
+                "ev": away_ev,
+                "market_ticker": market_ticker,
+            })
+
+        # New-format spreads rows are fully built for this game; skip legacy logic below.
+        continue
         
         if DEBUG_SPREADS:
             print(f"  Found {len(spread_markets)} spread market(s)")
@@ -1143,6 +1472,17 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
                 "home_kalshi_price_cents": home_kalshi_price_cents,  # Price in cents for dollar liquidity calc
             })
     
+    # Sort by ROTO, time, line magnitude, then side (home first per strike)
+    spread_rows.sort(key=lambda x: (
+        x.get('away_roto') is None,
+        x.get('away_roto') or 0,
+        x.get('event_start') or "",
+        x.get('line') is None,
+        abs(x.get('line') or 0),
+        (x.get('line') or 0) > 0,  # negative (home) first
+        (x.get("side") or ""),
+    ))
+
     return spread_rows
 
 

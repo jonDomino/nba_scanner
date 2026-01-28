@@ -136,11 +136,16 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         home_ev_top = (home_pinnacle - yes_be_top_home) * 100.0 if (home_pinnacle is not None and yes_be_top_home is not None) else None
         home_ev_topm1 = (home_pinnacle - yes_be_topm1_home) * 100.0 if (home_pinnacle is not None and yes_be_topm1_home is not None) else None
         
+        away_code = game.get("kalshi_away_code") or ""
+        home_code = game.get("kalshi_home_code") or ""
+        game_code = f"{away_code}@{home_code}" if (away_code and home_code) else ""
+
         base = {
             "game_date": game.get("game_date", "N/A"),
             "event_start": game.get("event_start"),
             "away_roto": game.get("away_roto"),
             "event_ticker": event_ticker or None,
+            "game": game_code,
             "market": "ML",
             "line": None,
         }
@@ -148,8 +153,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         # Away side row
         moneyline_rows.append({
             **base,
-            "side": "AWAY",
-            "team": game.get("away_team_name", "N/A"),
+            "side": away_code or "AWAY",
             "kalshi_prob": yes_be_top_away,
             "kalshi_liq": yes_bid_top_liq_away,
             "kalshi_price_cents": yes_bid_top_c_away,
@@ -161,8 +165,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         # Home side row
         moneyline_rows.append({
             **base,
-            "side": "HOME",
-            "team": game.get("home_team_name", "N/A"),
+            "side": home_code or "HOME",
             "kalshi_prob": yes_be_top_home,
             "kalshi_liq": yes_bid_top_liq_home,
             "kalshi_price_cents": yes_bid_top_c_home,
@@ -171,7 +174,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
             "market_ticker": game.get("home_kalshi_ticker"),
         })
     
-    # Sort by ROTO ascending, then side (AWAY first), then time
+    # Sort by ROTO ascending, then time, then side (away code first if available)
     side_rank = {"AWAY": 0, "HOME": 1}
     moneyline_rows.sort(key=lambda x: (
         x.get('away_roto') is None,

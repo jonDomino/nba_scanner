@@ -244,7 +244,7 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         .table-toggle-button:hover {
             background-color: #333;
         }
-
+        
         /* Click-to-sort headers (no visible indicator) */
         th.sortable {
             cursor: pointer;
@@ -567,33 +567,13 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             }
         }
         
-        // Set default visibility: moneylines visible, spreads and totals hidden
+        // Set default visibility: consolidated visible by default
         document.addEventListener('DOMContentLoaded', function() {
-            // Moneylines: visible by default (no action needed)
-            
-            // Spreads: hidden by default
-            const spreadsTable = document.getElementById('spreadsTable');
-            if (spreadsTable) {
-                spreadsTable.classList.add('hidden');
-                const spreadsBtn = document.getElementById('spreadsToggleBtn');
-                if (spreadsBtn) {
-                    spreadsBtn.textContent = 'Show';
-                }
-            }
-            
-            // Totals: hidden by default
-            const totalsTable = document.getElementById('totalsTable');
-            if (totalsTable) {
-                totalsTable.classList.add('hidden');
-                const totalsBtn = document.getElementById('totalsToggleBtn');
-                if (totalsBtn) {
-                    totalsBtn.textContent = 'Show';
-                }
-            }
+            // Consolidated: visible by default (no action needed)
 
-            // Default: sort moneylines by EV desc
+            // Default: sort consolidated by EV desc
             // Column order: ... Kalshi(7), Pinnacle(8), EV(9), Liq(10)
-            sortTable('moneylinesTable', 9, 'num', 'desc');
+            sortTable('consolidatedTable', 9, 'num', 'desc');
         });
 
         // -----------------------------
@@ -686,24 +666,24 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         </div>
         <div class="table-section">
             <div class="table-header">
-                <button class="table-toggle-button" id="moneylinesToggleBtn" onclick="toggleTable('moneylines')">Hide</button>
-                <h2>MONEYLINES</h2>
+                <button class="table-toggle-button" id="consolidatedToggleBtn" onclick="toggleTable('consolidated')">Hide</button>
+                <h2>CONSOLIDATED</h2>
             </div>
-            <div class="table-container" id="moneylinesTable">
+            <div class="table-container" id="consolidatedTable">
             <table>
             <thead>
                 <tr>
                     <th>Game Date</th>
                     <th>Game Time</th>
                     <th>ROTO</th>
+                    <th>Game</th>
                     <th>Market</th>
                     <th>Side</th>
                     <th>Line</th>
-                    <th>Team</th>
                     <th>Kalshi</th>
                     <th>Pinnacle</th>
-                    <th class="sortable" onclick="sortTable('moneylinesTable', 9, 'num')">EV</th>
-                    <th class="sortable" onclick="sortTable('moneylinesTable', 10, 'num')">Liq</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 9, 'num')">EV</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 10, 'num')">Liq</th>
                 </tr>
             </thead>
             <tbody>
@@ -779,9 +759,20 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             # Yellow to green (66-100%)
             return "linear-gradient(to right, #fbbf24 0%, #4ade80 100%)"
     
+    # -----------------------------
+    # Consolidated (ML + TOTALS)
+    # -----------------------------
+    consolidated_rows: List[Dict[str, Any]] = []
+    if table_rows:
+        consolidated_rows.extend(table_rows)
+    if spread_rows:
+        consolidated_rows.extend(spread_rows)
+    if totals_rows:
+        consolidated_rows.extend(totals_rows)
+
     # Find max dollar liquidity for scaling bars
     max_dollar_liq = 0.0
-    for row in table_rows:
+    for row in consolidated_rows:
         dollar_liq = calc_dollar_liq(row.get("kalshi_price_cents"), row.get("kalshi_liq"))
         if dollar_liq is not None:
             max_dollar_liq = max(max_dollar_liq, dollar_liq)
@@ -790,24 +781,32 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
     if max_dollar_liq == 0:
         max_dollar_liq = 10000.0  # Default max for scaling ($10,000)
     
-    for row in table_rows:
-        # Get values (used for both display and sorting)
+    consolidated_rows_sorted = sorted(consolidated_rows, key=lambda x: (
+        x.get('away_roto') is None,
+        x.get('away_roto') or 0,
+        x.get('event_start') or "",
+        (x.get("market") or ""),
+        (x.get("side") or ""),
+        x.get('line') is None,
+        x.get('line') or 0,
+    ))
+
+    for row in consolidated_rows_sorted:
         market = row.get("market") or "ML"
         side = row.get("side") or ""
         line = row.get("line")
         line_str = "" if line is None else str(line)
-        team = row.get("team") or "N/A"
+        game_code = row.get("game") or ""
 
         kalshi_val = row.get("kalshi_prob")
         pinnacle_val = row.get("pinnacle_prob")
         ev_val = row.get("ev")
 
         kalshi_str = f"{kalshi_val:.4f}" if kalshi_val is not None else "N/A"
-        pinnacle_str = f"{pinnacle_val:.3f}" if pinnacle_val is not None else "N/A"
+        pinnacle_str = f"{pinnacle_val:.4f}" if pinnacle_val is not None else "N/A"
         ev_str = format_ev_percent(ev_val)
         ev_class = "ev-positive" if (ev_val is not None and ev_val > 0) else ("ev-negative" if (ev_val is not None and ev_val < 0) else "ev-neutral")
 
-        # Liquidity (display dollars; sort by dollars)
         liq_contracts = row.get("kalshi_liq")
         liq_price_cents = row.get("kalshi_price_cents")
         liq_str = format_liq_dollars(liq_price_cents, liq_contracts)
@@ -817,29 +816,27 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 
         away_roto = row.get('away_roto')
         away_roto_str = str(away_roto) if away_roto is not None else "N/A"
-        
-        # Format game time and check if started
+
         event_start = row.get('event_start')
         game_time_str = format_game_time_pst(event_start)
         is_started = is_game_started(event_start)
         row_class = "game-started" if is_started else ""
-        
-        # Blank out fair odds and EVs for started games
+
         if is_started:
             pinnacle_str = ""
             ev_str = ""
             pinnacle_val = None
             ev_val = None
-        
+
         html_content += f"""
                 <tr class="{row_class}">
-                    <td class="date-cell">{row['game_date']}</td>
+                    <td class="date-cell">{row.get('game_date') or ''}</td>
                     <td class="date-cell">{game_time_str}</td>
                     <td class="prob-value">{away_roto_str}</td>
+                    <td class="team-name">{game_code}</td>
                     <td class="prob-value">{market}</td>
                     <td class="prob-value">{side}</td>
                     <td class="prob-value">{line_str}</td>
-                    <td class="team-name">{team}</td>
                     <td class="prob-value odds-cell" data-prob="{kalshi_val if kalshi_val is not None else ''}" data-original="{kalshi_str}">{kalshi_str}</td>
                     <td class="prob-value odds-cell fair-cell" data-prob="{pinnacle_val if pinnacle_val is not None else ''}" data-original="{pinnacle_str}">{pinnacle_str}</td>
                     <td class="{ev_class}" data-sort="{ev_val if ev_val is not None else ''}">{ev_str}</td>
@@ -849,342 +846,42 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                     </td>
                 </tr>
 """
-    
+
     html_content += """
             </tbody>
         </table>
         </div>
         </div>
+        <script>
+            // Auto-resize Streamlit iframe to fit full content height (no internal scrollbars).
+            function __streamlitSetFrameHeight() {
+                const h = Math.max(
+                    document.documentElement.scrollHeight || 0,
+                    document.body ? (document.body.scrollHeight || 0) : 0
+                );
+                try {
+                    window.parent.postMessage(
+                        { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: h },
+                        "*"
+                    );
+                } catch (e) {
+                    // no-op
+                }
+            }
+
+            window.addEventListener("load", __streamlitSetFrameHeight);
+            window.addEventListener("resize", __streamlitSetFrameHeight);
+
+            if (window.ResizeObserver) {
+                const ro = new ResizeObserver(() => __streamlitSetFrameHeight());
+                ro.observe(document.documentElement);
+            } else {
+                setInterval(__streamlitSetFrameHeight, 1000);
+            }
+        </script>
 """
     
-    # Add spreads table if provided
-    if spread_rows:
-        html_content += """
-        <div class="table-section">
-            <div class="table-header">
-                <button class="table-toggle-button" id="spreadsToggleBtn" onclick="toggleTable('spreads')">Hide</button>
-                <h2>SPREADS [BETA - DATA NOT VALIDATED]</h2>
-            </div>
-            <div class="table-container hidden" id="spreadsTable">
-            <table>
-            <thead>
-                <tr>
-                    <th>Game Date</th>
-                    <th>Game Time</th>
-                    <th>ROTO</th>
-                    <th>Away Team</th>
-                    <th>Home Team</th>
-                    <th>Consensus</th>
-                    <th>Strike</th>
-                    <th>Away Kalshi</th>
-                    <th>Home Kalshi</th>
-                    <th class="sortable" onclick="sortTable('spreadsTable', 9, 'num')">Away Liq</th>
-                    <th class="sortable" onclick="sortTable('spreadsTable', 10, 'num')">Home Liq</th>
-                </tr>
-            </thead>
-            <tbody>
-"""
-        
-        # Find max dollar liquidity for spreads scaling (from both away and home)
-        max_spread_dollar_liq = 0.0
-        for row in spread_rows:
-            away_dollar_liq = calc_dollar_liq(row.get('away_kalshi_price_cents'), row.get('away_kalshi_liq'))
-            home_dollar_liq = calc_dollar_liq(row.get('home_kalshi_price_cents'), row.get('home_kalshi_liq'))
-            if away_dollar_liq is not None:
-                max_spread_dollar_liq = max(max_spread_dollar_liq, away_dollar_liq)
-            if home_dollar_liq is not None:
-                max_spread_dollar_liq = max(max_spread_dollar_liq, home_dollar_liq)
-        
-        if max_spread_dollar_liq == 0:
-            max_spread_dollar_liq = 10000.0  # Default max for scaling ($10,000)
-        
-        # Sort spreads by ROTO
-        spread_rows_sorted = sorted(spread_rows, key=lambda x: (
-            x.get('away_roto') is None,
-            x.get('away_roto') or 0,
-            x.get('game_date') or ''
-        ))
-        
-        # Track previous game to detect duplicates
-        prev_game_key = None
-        
-        for row in spread_rows_sorted:
-            # Format game time and check if started
-            event_start = row.get('event_start')
-            game_time_str = format_game_time_pst(event_start)
-            is_started = is_game_started(event_start)
-            row_class = "game-started" if is_started else ""
-            
-            # Create game key to detect duplicate rows (same game, different strikes)
-            game_key = (
-                row.get('game_date'),
-                row.get('away_team'),
-                row.get('home_team'),
-                row.get('away_roto'),
-                row.get('consensus')
-            )
-            
-            # Determine if this is a duplicate row (same game as previous)
-            is_duplicate = (game_key == prev_game_key)
-            prev_game_key = game_key
-            
-            # Format ROTO
-            away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
-            
-            # Format consensus
-            consensus_str = row.get('consensus', 'N/A')
-            
-            # Format strike
-            strike_str = row.get('strike', 'N/A')
-            
-            # Get Away/Home Kalshi values (now stored separately)
-            away_kalshi_val = row.get('away_kalshi_prob')
-            home_kalshi_val = row.get('home_kalshi_prob')
-            away_kalshi_liq = row.get('away_kalshi_liq')
-            home_kalshi_liq = row.get('home_kalshi_liq')
-            
-            away_kalshi_str = f"{away_kalshi_val:.4f}" if away_kalshi_val is not None else "N/A"
-            home_kalshi_str = f"{home_kalshi_val:.4f}" if home_kalshi_val is not None else "N/A"
-            
-            # Format liquidity in dollars: (price_cents / 100.0) * contracts
-            away_kalshi_liq_str = format_liq_dollars(
-                row.get('away_kalshi_price_cents'),
-                away_kalshi_liq
-            )
-            home_kalshi_liq_str = format_liq_dollars(
-                row.get('home_kalshi_price_cents'),
-                home_kalshi_liq
-            )
-            
-            # Calculate dollar liquidity and bar percentages/gradients
-            away_kalshi_dollar_liq = calc_dollar_liq(row.get('away_kalshi_price_cents'), away_kalshi_liq)
-            home_kalshi_dollar_liq = calc_dollar_liq(row.get('home_kalshi_price_cents'), home_kalshi_liq)
-            
-            away_kalshi_liq_pct = calc_liq_bar_pct(away_kalshi_dollar_liq, max_spread_dollar_liq)
-            home_kalshi_liq_pct = calc_liq_bar_pct(home_kalshi_dollar_liq, max_spread_dollar_liq)
-            away_kalshi_liq_gradient = calc_liq_gradient(away_kalshi_dollar_liq, max_spread_dollar_liq)
-            home_kalshi_liq_gradient = calc_liq_gradient(home_kalshi_dollar_liq, max_spread_dollar_liq)
-            
-            # For duplicate rows, leave game metadata cells empty
-            game_date_cell = row['game_date'] if not is_duplicate else ""
-            game_time_cell = game_time_str if not is_duplicate else ""
-            roto_cell = away_roto_str if not is_duplicate else ""
-            away_team_cell = row['away_team'] if not is_duplicate else ""
-            home_team_cell = row['home_team'] if not is_duplicate else ""
-            consensus_cell = consensus_str if not is_duplicate else ""
-            
-            html_content += f"""
-                <tr class="{row_class}">
-                    <td class="date-cell">{game_date_cell}</td>
-                    <td class="date-cell">{game_time_cell}</td>
-                    <td class="prob-value">{roto_cell}</td>
-                    <td class="team-name">{away_team_cell}</td>
-                    <td class="team-name">{home_team_cell}</td>
-                    <td class="team-name">{consensus_cell}</td>
-                    <td class="team-name">{strike_str}</td>
-"""
-            
-            # Away Kalshi cell (no bar chart)
-            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{away_kalshi_val if away_kalshi_val is not None else ''}" data-original="{away_kalshi_str}">{away_kalshi_str}</td>
-"""
-            
-            # Home Kalshi cell (no bar chart)
-            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{home_kalshi_val if home_kalshi_val is not None else ''}" data-original="{home_kalshi_str}">{home_kalshi_str}</td>
-"""
-            
-            # Away Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{away_kalshi_dollar_liq if away_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {away_kalshi_liq_pct}; --liq-gradient: {away_kalshi_liq_gradient};">
-                        <div class="kalshi-cell-content">{away_kalshi_liq_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            
-            # Home Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{home_kalshi_dollar_liq if home_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {home_kalshi_liq_pct}; --liq-gradient: {home_kalshi_liq_gradient};">
-                        <div class="kalshi-cell-content">{home_kalshi_liq_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            
-            html_content += f"""                </tr>
-"""
-        
-        html_content += """
-            </tbody>
-        </table>
-            </div>
-        </div>
-"""
-    
-    # Add totals table if provided (after spreads, or after moneylines if no spreads)
-    if totals_rows:
-        html_content += """
-        <div class="table-section">
-            <div class="table-header">
-                <button class="table-toggle-button" id="totalsToggleBtn" onclick="toggleTable('totals')">Hide</button>
-                <h2>TOTALS [BETA - DATA NOT VALIDATED]</h2>
-            </div>
-            <div class="table-container hidden" id="totalsTable">
-            <table>
-            <thead>
-                <tr>
-                    <th>Game Date</th>
-                    <th>Game Time</th>
-                    <th>ROTO</th>
-                    <th>Away Team</th>
-                    <th>Home Team</th>
-                    <th>Consensus</th>
-                    <th>Strike</th>
-                    <th>Over Kalshi</th>
-                    <th>Under Kalshi</th>
-                    <th class="sortable" onclick="sortTable('totalsTable', 9, 'num')">Over Liq</th>
-                    <th class="sortable" onclick="sortTable('totalsTable', 10, 'num')">Under Liq</th>
-                </tr>
-            </thead>
-            <tbody>
-"""
-        
-        # Find max dollar liquidity for totals scaling (from both over and under)
-        max_totals_dollar_liq = 0.0
-        for row in totals_rows:
-            over_dollar_liq = calc_dollar_liq(row.get('over_kalshi_price_cents'), row.get('over_kalshi_liq'))
-            under_dollar_liq = calc_dollar_liq(row.get('under_kalshi_price_cents'), row.get('under_kalshi_liq'))
-            if over_dollar_liq is not None:
-                max_totals_dollar_liq = max(max_totals_dollar_liq, over_dollar_liq)
-            if under_dollar_liq is not None:
-                max_totals_dollar_liq = max(max_totals_dollar_liq, under_dollar_liq)
-        
-        if max_totals_dollar_liq == 0:
-            max_totals_dollar_liq = 10000.0  # Default max for scaling ($10,000)
-        
-        # Sort totals by ROTO
-        totals_rows_sorted = sorted(totals_rows, key=lambda x: (
-            x.get('away_roto') is None,
-            x.get('away_roto') or 0,
-            x.get('game_date') or ''
-        ))
-        
-        # Track previous game to detect duplicates
-        prev_game_key = None
-        
-        for row in totals_rows_sorted:
-            # Format game time and check if started
-            event_start = row.get('event_start')
-            game_time_str = format_game_time_pst(event_start)
-            is_started = is_game_started(event_start)
-            row_class = "game-started" if is_started else ""
-            
-            # Create game key to detect duplicate rows (same game, different strikes)
-            game_key = (
-                row.get('game_date'),
-                row.get('away_team'),
-                row.get('home_team'),
-                row.get('away_roto'),
-                row.get('consensus')
-            )
-            
-            # Determine if this is a duplicate row (same game as previous)
-            is_duplicate = (game_key == prev_game_key)
-            prev_game_key = game_key
-            
-            # Format ROTO
-            away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
-            
-            # Format consensus
-            consensus_str = row.get('consensus', 'N/A')
-            
-            # Format strike (replace trailing .0 with .5 for display - Kalshi uses half-point increments but API returns integers)
-            strike_val = row.get('strike')
-            if strike_val is not None and strike_val != 'N/A':
-                strike_str = str(strike_val)
-                # If it ends with .0, replace with .5; otherwise if it's a whole number, append .5
-                if strike_str.endswith('.0'):
-                    strike_str = strike_str[:-2] + '.5'
-                elif '.' not in strike_str:
-                    # It's an integer, append .5
-                    strike_str = f"{strike_str}.5"
-                # If it already has a decimal part other than .0, leave it as is
-            else:
-                strike_str = 'N/A'
-            
-            # Get Over/Under Kalshi values
-            over_kalshi_val = row.get('over_kalshi_prob')
-            under_kalshi_val = row.get('under_kalshi_prob')
-            over_kalshi_liq = row.get('over_kalshi_liq')
-            under_kalshi_liq = row.get('under_kalshi_liq')
-            
-            over_kalshi_str = f"{over_kalshi_val:.4f}" if over_kalshi_val is not None else "N/A"
-            under_kalshi_str = f"{under_kalshi_val:.4f}" if under_kalshi_val is not None else "N/A"
-            
-            # Format liquidity in dollars: (price_cents / 100.0) * contracts
-            over_kalshi_liq_str = format_liq_dollars(
-                row.get('over_kalshi_price_cents'),
-                over_kalshi_liq
-            )
-            under_kalshi_liq_str = format_liq_dollars(
-                row.get('under_kalshi_price_cents'),
-                under_kalshi_liq
-            )
-            
-            # Calculate dollar liquidity and bar percentages/gradients
-            over_kalshi_dollar_liq = calc_dollar_liq(row.get('over_kalshi_price_cents'), over_kalshi_liq)
-            under_kalshi_dollar_liq = calc_dollar_liq(row.get('under_kalshi_price_cents'), under_kalshi_liq)
-            
-            over_kalshi_liq_pct = calc_liq_bar_pct(over_kalshi_dollar_liq, max_totals_dollar_liq)
-            under_kalshi_liq_pct = calc_liq_bar_pct(under_kalshi_dollar_liq, max_totals_dollar_liq)
-            over_kalshi_liq_gradient = calc_liq_gradient(over_kalshi_dollar_liq, max_totals_dollar_liq)
-            under_kalshi_liq_gradient = calc_liq_gradient(under_kalshi_dollar_liq, max_totals_dollar_liq)
-            
-            # For duplicate rows, leave game metadata cells empty
-            game_date_cell = row['game_date'] if not is_duplicate else ""
-            game_time_cell = game_time_str if not is_duplicate else ""
-            roto_cell = away_roto_str if not is_duplicate else ""
-            away_team_cell = row['away_team'] if not is_duplicate else ""
-            home_team_cell = row['home_team'] if not is_duplicate else ""
-            consensus_cell = consensus_str if not is_duplicate else ""
-            
-            html_content += f"""
-                <tr class="{row_class}">
-                    <td class="date-cell">{game_date_cell}</td>
-                    <td class="date-cell">{game_time_cell}</td>
-                    <td class="prob-value">{roto_cell}</td>
-                    <td class="team-name">{away_team_cell}</td>
-                    <td class="team-name">{home_team_cell}</td>
-                    <td class="team-name">{consensus_cell}</td>
-                    <td class="team-name">{strike_str}</td>
-"""
-            
-            # Over Kalshi cell (no bar chart)
-            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{over_kalshi_val if over_kalshi_val is not None else ''}" data-original="{over_kalshi_str}">{over_kalshi_str}</td>
-"""
-            
-            # Under Kalshi cell (no bar chart)
-            html_content += f"""                    <td class="prob-value odds-cell" data-prob="{under_kalshi_val if under_kalshi_val is not None else ''}" data-original="{under_kalshi_str}">{under_kalshi_str}</td>
-"""
-            
-            # Over Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{over_kalshi_dollar_liq if over_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {over_kalshi_liq_pct}; --liq-gradient: {over_kalshi_liq_gradient};">
-                        <div class="kalshi-cell-content">{over_kalshi_liq_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            
-            # Under Liq cell (with bar chart)
-            html_content += f"""                    <td class="kalshi-cell prob-value" data-sort="{under_kalshi_dollar_liq if under_kalshi_dollar_liq is not None else ''}" style="--liq-pct: {under_kalshi_liq_pct}; --liq-gradient: {under_kalshi_liq_gradient};">
-                        <div class="kalshi-cell-content">{under_kalshi_liq_str}</div>
-                        <div class="liquidity-bar"></div>
-                    </td>
-"""
-            
-            html_content += f"""                </tr>
-"""
-        
-        html_content += """
-            </tbody>
-        </table>
-            </div>
-        </div>
-"""
+    # Individual market tables intentionally removed (everything lives in Consolidated)
     
     html_content += """
     </div>
@@ -1218,16 +915,16 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
     """
     Print a simplified dashboard table without tickers (console version).
     
-    Shows: GameDate, GameTime, ROTO, Market, Side, Line, Team, Pinnacle, Kalshi, Liq, EV
+    Shows: GameDate, GameTime, ROTO, Game, Market, Side, Line, Pinnacle, Kalshi, Liq, EV
     """
     header = (
         f"{'GameDate':<12} "
         f"{'GameTime':<10} "
         f"{'ROTO':<6} "
+        f"{'GAME':<10} "
         f"{'MKT':<4} "
         f"{'SIDE':<5} "
         f"{'LINE':<6} "
-        f"{'TEAM':<30} "
         f"{'PIN':<10} "
         f"{'KALSHI':<12} "
         f"{'LIQ':<10} "
@@ -1245,7 +942,7 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         side = row.get("side") or ""
         line = row.get("line")
         line_str = "" if line is None else str(line)
-        team = row.get("team") or "N/A"
+        game_code = row.get("game") or ""
 
         pinnacle_val = row.get("pinnacle_prob")
         pinnacle_str = f"{pinnacle_val:.3f}" if pinnacle_val is not None else "N/A"
@@ -1273,10 +970,10 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
             f"{row['game_date']:<12} "
             f"{game_time_str:<10}{started_marker} "
             f"{away_roto_str:<6} "
+            f"{game_code:<10} "
             f"{market:<4} "
             f"{side:<5} "
             f"{line_str:<6} "
-            f"{team:<30} "
             f"{pinnacle_str:<10} "
             f"{kalshi_str:<12} "
             f"{liq_str:<10} "

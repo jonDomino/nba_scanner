@@ -7,6 +7,7 @@ This app embeds the existing HTML dashboard into Streamlit using st.components.v
 import os
 import streamlit as st
 from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 # Import the specific exception type for secrets
 try:
@@ -71,22 +72,49 @@ st.set_page_config(
 
 # Cache data with TTL to reduce API calls
 @st.cache_data(ttl=30)  # Cache for 30 seconds
-def get_cached_dashboard():
+def get_cached_rows():
     """
-    Build and cache the dashboard HTML.
+    Build and cache the raw dashboard rows (HTML is built after applying UI filters).
     
     Returns:
-        Tuple of (moneyline_rows, spread_rows, totals_rows, html_string, timestamp)
+        Tuple of (moneyline_rows, spread_rows, totals_rows, timestamp)
     """
     try:
         moneyline_rows, spread_rows, totals_rows = build_all_rows(debug=False)
-        html = build_dashboard_html_all(moneyline_rows, spread_rows, totals_rows)
         timestamp = datetime.now()
-        return moneyline_rows, spread_rows, totals_rows, html, timestamp
+        return moneyline_rows, spread_rows, totals_rows, timestamp
     except Exception as e:
         st.error(f"Error building dashboard: {e}")
         st.stop()
-        return None, None, None, None, None
+        return None, None, None, None
+
+
+def _calc_dollar_liq(row: Dict[str, Any]) -> Optional[float]:
+    """Dollar liquidity at TOB: (price_cents/100) * contracts."""
+    try:
+        price_cents = row.get("kalshi_price_cents")
+        contracts = row.get("kalshi_liq")
+        if price_cents is None or contracts is None:
+            return None
+        return (float(price_cents) / 100.0) * float(contracts)
+    except Exception:
+        return None
+
+
+def _filter_rows_by_liq(rows: Optional[List[Dict[str, Any]]], min_dollars: float) -> List[Dict[str, Any]]:
+    """Keep only rows with dollar liquidity >= min_dollars."""
+    if not rows:
+        return []
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        d = _calc_dollar_liq(r)
+        if d is None:
+            continue
+        if d >= float(min_dollars):
+            out.append(r)
+    return out
 
 
 def main():
@@ -151,31 +179,55 @@ def main():
         
         if st.button("🔄 Refresh Now", type="primary"):
             # Clear cache and rebuild
-            get_cached_dashboard.clear()
+            get_cached_rows.clear()
             st.rerun()
         
         st.markdown("---")
         st.caption("Dashboard refreshes automatically every 30 seconds.")
         st.caption("Click 'Refresh Now' to force immediate refresh.")
     
-    # Get cached data
-    moneyline_rows, spread_rows, totals_rows, html, timestamp = get_cached_dashboard()
+    # Controls (top of page)
+    liq_min = st.number_input(
+        "Min Liq ($)",
+        min_value=0,
+        value=5000,
+        step=500,
+        help="Filter rows by TOB dollar liquidity: (price_cents/100) * contracts",
+    )
     
-    if moneyline_rows is None or html is None:
+    # Get cached raw data
+    moneyline_rows, spread_rows, totals_rows, timestamp = get_cached_rows()
+    
+    if moneyline_rows is None:
         st.error("Failed to load dashboard data.")
         return
+
+    # Apply liquidity filter to all markets
+    moneyline_rows_f = _filter_rows_by_liq(moneyline_rows, liq_min)
+    spread_rows_f = _filter_rows_by_liq(spread_rows, liq_min) if spread_rows else []
+    totals_rows_f = _filter_rows_by_liq(totals_rows, liq_min) if totals_rows else []
+
+    html = build_dashboard_html_all(moneyline_rows_f, spread_rows_f, totals_rows_f)
     
     # Display last updated timestamp
     if timestamp:
         st.caption(f"Last updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} PST")
     
-    # Display game count
-    moneyline_games = len({r.get("event_start") for r in (moneyline_rows or []) if isinstance(r, dict) and r.get("event_start")}) if moneyline_rows else 0
-    st.info(f"Showing {moneyline_games} moneyline game(s), {len(spread_rows) if spread_rows else 0} spread row(s), {len(totals_rows) if totals_rows else 0} totals row(s)")
+    # Display counts (consolidated)
+    consolidated_rows = (moneyline_rows_f or []) + (spread_rows_f or []) + (totals_rows_f or [])
+    consolidated_games = len({r.get("event_start") for r in consolidated_rows if isinstance(r, dict) and r.get("event_start")}) if consolidated_rows else 0
+    st.info(f"Showing {len(consolidated_rows)} row(s) across {consolidated_games} game(s) (liq ≥ ${int(liq_min):,})")
     
-    # Embed HTML dashboard
-    # Use height=1200 for comfortable viewing, scrolling enabled
-    st.components.v1.html(html, height=1200, scrolling=True)
+    # Embed HTML dashboard.
+    #
+    # NOTE: Streamlit iframe auto-resize via postMessage is not consistent across Streamlit versions.
+    # To ensure the consolidated table is not truncated (and avoid an internal scrollbar),
+    # allocate a large enough height based on the number of rows.
+    #
+    # The Streamlit page can still scroll normally.
+    iframe_height = int(500 + (len(consolidated_rows) * 48))
+    iframe_height = max(900, min(30000, iframe_height))
+    st.components.v1.html(html, height=iframe_height, scrolling=False)
     
     # Footer
     st.markdown("---")
