@@ -121,14 +121,20 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         yes_bid_top_c_away = prob_data.get("yes_bid_top_c_away") if prob_data else None
         yes_bid_top_c_home = prob_data.get("yes_bid_top_c_home") if prob_data else None
         
-        # Compute EVs (buyer/YES exposure perspective)
+        # "Pinnacle" column behavior:
+        # Use the opponent's Pinnacle probability and invert it (1 - opp_prob).
+        # Example: if HOME is 0.15 (underdog), then AWAY shows 0.85.
         away_fair = game.get("away_fair")
         home_fair = game.get("home_fair")
-        
-        away_ev_top = (away_fair - yes_be_top_away) * 100.0 if (away_fair is not None and yes_be_top_away is not None) else None
-        away_ev_topm1 = (away_fair - yes_be_topm1_away) * 100.0 if (away_fair is not None and yes_be_topm1_away is not None) else None
-        home_ev_top = (home_fair - yes_be_top_home) * 100.0 if (home_fair is not None and yes_be_top_home is not None) else None
-        home_ev_topm1 = (home_fair - yes_be_topm1_home) * 100.0 if (home_fair is not None and yes_be_topm1_home is not None) else None
+
+        away_pinnacle = (1.0 - home_fair) if home_fair is not None else away_fair
+        home_pinnacle = (1.0 - away_fair) if away_fair is not None else home_fair
+
+        # Compute EVs (buyer/YES exposure perspective) using the same Pinnacle values displayed
+        away_ev_top = (away_pinnacle - yes_be_top_away) * 100.0 if (away_pinnacle is not None and yes_be_top_away is not None) else None
+        away_ev_topm1 = (away_pinnacle - yes_be_topm1_away) * 100.0 if (away_pinnacle is not None and yes_be_topm1_away is not None) else None
+        home_ev_top = (home_pinnacle - yes_be_top_home) * 100.0 if (home_pinnacle is not None and yes_be_top_home is not None) else None
+        home_ev_topm1 = (home_pinnacle - yes_be_topm1_home) * 100.0 if (home_pinnacle is not None and yes_be_topm1_home is not None) else None
         
         base = {
             "game_date": game.get("game_date", "N/A"),
@@ -147,7 +153,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
             "kalshi_prob": yes_be_top_away,
             "kalshi_liq": yes_bid_top_liq_away,
             "kalshi_price_cents": yes_bid_top_c_away,
-            "pinnacle_prob": away_fair,
+            "pinnacle_prob": away_pinnacle,
             "ev": away_ev_top,
             "market_ticker": game.get("away_kalshi_ticker"),
         })
@@ -160,7 +166,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
             "kalshi_prob": yes_be_top_home,
             "kalshi_liq": yes_bid_top_liq_home,
             "kalshi_price_cents": yes_bid_top_c_home,
-            "pinnacle_prob": home_fair,
+            "pinnacle_prob": home_pinnacle,
             "ev": home_ev_top,
             "market_ticker": game.get("home_kalshi_ticker"),
         })
