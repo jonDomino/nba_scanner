@@ -1168,6 +1168,7 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
                 "game_date": game.get("game_date"),
                 "event_start": game.get("event_start"),
                 "away_roto": game.get("away_roto"),
+                "home_roto": game.get("home_roto"),
                 "game": game_code,
                 # Keep team names on the row for debugging/export, but the dashboard uses `game`.
                 "away_team": away_team_name,
@@ -1178,6 +1179,8 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
 
             totals_rows.append({
                 **base,
+                # Roto convention for totals: OVER uses away rotation, UNDER uses home rotation
+                "roto": game.get("away_roto"),
                 "side": "OVER",
                 "kalshi_prob": over_kalshi_prob,
                 "kalshi_liq": over_kalshi_liq,
@@ -1189,6 +1192,7 @@ def build_totals_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, sn
 
             totals_rows.append({
                 **base,
+                "roto": game.get("home_roto"),
                 "side": "UNDER",
                 "kalshi_prob": under_kalshi_prob,
                 "kalshi_liq": under_kalshi_liq,

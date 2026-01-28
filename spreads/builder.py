@@ -113,15 +113,12 @@ def _extract_pinnacle_spreads_alt_lines_ms7(
     away_team_id: Optional[int],
 ) -> Dict[float, Dict[str, Any]]:
     """
-    Extract ms7 ("Sharp Book Price") alt spread lines and pair home/away for each magnitude.
+    Extract ms7 ("Sharp Book Price") alt spread lines and retain BOTH signs when present.
 
     Returns:
       dict magnitude -> {
-        "home_american": int|None,
-        "away_american": int|None,
-        "home_prob": float|None,
-        "away_prob": float|None,
-        "estimated_other_side": bool
+        "home": { -1: american_for_-X, +1: american_for_+X },
+        "away": { -1: american_for_-X, +1: american_for_+X },
       }
     """
     market_lines = event.get("gameOddsMarketSourcesLines", {})
@@ -218,46 +215,104 @@ def _extract_pinnacle_spreads_alt_lines_ms7(
     if not home_lines and not away_lines:
         return {}
 
-    # magnitude -> per-side american
-    paired: Dict[float, Dict[str, Any]] = {}
+    out: Dict[float, Dict[str, Any]] = {}
 
     def upsert(side: str, spread_line: float, american: int) -> None:
-        mag = abs(float(spread_line))
-        # Only keep .5-grid lines if possible (but don't drop if not)
-        if mag in paired and paired[mag].get(f"{side}_american") is not None:
-            # Prefer first seen (stable), but overwrite if previous was None
-            return
-        paired.setdefault(mag, {"home_american": None, "away_american": None})
-        paired[mag][f"{side}_american"] = int(american)
+        mag = float(abs(float(spread_line)))
+        sign = -1 if float(spread_line) < 0 else 1
+        out.setdefault(mag, {"home": {}, "away": {}})
+        # Keep first seen per (side, sign, mag) for stability
+        if sign not in out[mag][side]:
+            out[mag][side][sign] = int(american)
 
     for spread_line, american in home_lines:
         upsert("home", spread_line, american)
     for spread_line, american in away_lines:
         upsert("away", spread_line, american)
 
+    return out
+
+
+def _pair_pinnacle_spreads_by_overround(
+    raw_by_mag: Dict[float, Dict[str, Any]],
+    overround_target: float = PINNACLE_SPREADS_OVERROUND,
+) -> Dict[float, Dict[str, Any]]:
+    """
+    Convert raw sign-retaining ms7 spreads into a single "best orientation" per magnitude.
+
+    ms7 can contain BOTH +X and -X for each team. We pick the orientation that looks like a real
+    spread market (one side -X, the other +X) by choosing the pairing whose implied probs sum
+    closest to `overround_target`.
+
+    Returns:
+      dict magnitude -> {
+        "home_line": float, "away_line": float,             # signed
+        "home_american": int|None, "away_american": int|None,
+        "home_prob": float|None, "away_prob": float|None,
+        "estimated_other_side": bool,
+        "orientation_used": str, "orientation_score": float
+      }
+    """
     out: Dict[float, Dict[str, Any]] = {}
-    for mag, d in paired.items():
-        h_am = d.get("home_american")
-        a_am = d.get("away_american")
-        estimated = False
 
-        # Fill missing side using overround rule
-        if h_am is None and a_am is not None:
-            h_am = _estimate_missing_juice_from_known(a_am, PINNACLE_SPREADS_OVERROUND)
-            estimated = True
-        if a_am is None and h_am is not None:
-            a_am = _estimate_missing_juice_from_known(h_am, PINNACLE_SPREADS_OVERROUND)
-            estimated = True
+    def _score_pair(am1: Optional[int], am2: Optional[int]) -> Tuple[float, bool, Optional[int], Optional[int]]:
+        used_est = False
+        a1 = am1
+        a2 = am2
+        if a1 is None and a2 is None:
+            return (1e9, True, None, None)
+        if a1 is None and a2 is not None:
+            a1 = _estimate_missing_juice_from_known(a2, overround_target)
+            used_est = True
+        if a2 is None and a1 is not None:
+            a2 = _estimate_missing_juice_from_known(a1, overround_target)
+            used_est = True
+        p1 = american_to_prob(a1) if a1 is not None else None
+        p2 = american_to_prob(a2) if a2 is not None else None
+        if p1 is None or p2 is None:
+            return (1e9, True, a1, a2)
+        s = abs((p1 + p2) - overround_target)
+        if used_est:
+            s += 0.01
+        return (s, used_est, a1, a2)
 
-        h_prob = american_to_prob(h_am) if h_am is not None else None
-        a_prob = american_to_prob(a_am) if a_am is not None else None
+    for mag, d in raw_by_mag.items():
+        h = d.get("home") or {}
+        a = d.get("away") or {}
+        # Orientation 1: home -X with away +X
+        score1, est1, h1, a1 = _score_pair(h.get(-1), a.get(+1))
+        # Orientation 2: home +X with away -X
+        score2, est2, h2, a2 = _score_pair(h.get(+1), a.get(-1))
+
+        if score1 >= 1e8 and score2 >= 1e8:
+            continue
+
+        use1 = score1 <= score2
+        if use1:
+            home_line = -float(mag)
+            away_line = +float(mag)
+            home_am, away_am = h1, a1
+            used_est = est1
+            used = "home-neg/away-pos"
+            sc = float(score1)
+        else:
+            home_line = +float(mag)
+            away_line = -float(mag)
+            home_am, away_am = h2, a2
+            used_est = est2
+            used = "home-pos/away-neg"
+            sc = float(score2)
 
         out[float(mag)] = {
-            "home_american": h_am,
-            "away_american": a_am,
-            "home_prob": h_prob,
-            "away_prob": a_prob,
-            "estimated_other_side": estimated,
+            "home_line": home_line,
+            "away_line": away_line,
+            "home_american": home_am,
+            "away_american": away_am,
+            "home_prob": american_to_prob(home_am) if home_am is not None else None,
+            "away_prob": american_to_prob(away_am) if away_am is not None else None,
+            "estimated_other_side": bool(used_est),
+            "orientation_used": used,
+            "orientation_score": sc,
         }
 
     return out
@@ -1083,7 +1138,7 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
         home_code = game.get("kalshi_home_code") or ""
         game_code = f"{away_code}@{home_code}" if (away_code and home_code) else ""
 
-        # Discover Kalshi spread markets (home POV)
+        # Discover Kalshi spread markets
         if not event_ticker:
             if DEBUG_SPREADS:
                 print(f"  ⚠️ No event ticker, skipping")
@@ -1093,34 +1148,31 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
         if not spread_markets:
             continue
 
-        # Keep only home POV markets (per user: Kalshi spreads are home POV)
-        spread_markets = [m for m in spread_markets if (m.get("market_team_code") or "") == home_code]
-        if not spread_markets:
-            continue
-
-        # Kalshi markets by canonical strike
-        kalshi_by_strike: Dict[float, Dict[str, Any]] = {}
+        # Kalshi markets grouped by canonical strike (can include either team)
+        kalshi_candidates_by_strike: Dict[float, List[Dict[str, Any]]] = {}
         for m in spread_markets:
             s_raw = m.get("parsed_strike")
             s = canonicalize_kalshi_strike(s_raw)
             t = m.get("ticker")
             if s is None or not t:
                 continue
-            if s not in kalshi_by_strike:
-                kalshi_by_strike[s] = m
+            kalshi_candidates_by_strike.setdefault(s, []).append(m)
 
-        if not kalshi_by_strike:
+        if not kalshi_candidates_by_strike:
             continue
 
-        # Extract Pinnacle(ms7) alt spreads and pair home/away by magnitude
-        pinnacle_lines = _extract_pinnacle_spreads_alt_lines_ms7(unabated_event, home_team_id, away_team_id)
-        if not pinnacle_lines:
+        # Extract Pinnacle(ms7) alt spreads (retain both signs), then pick the best +/- orientation per magnitude.
+        pinnacle_raw_by_mag = _extract_pinnacle_spreads_alt_lines_ms7(unabated_event, home_team_id, away_team_id)
+        if not pinnacle_raw_by_mag:
+            continue
+        pinnacle_paired_by_mag = _pair_pinnacle_spreads_by_overround(pinnacle_raw_by_mag, PINNACLE_SPREADS_OVERROUND)
+        if not pinnacle_paired_by_mag:
             continue
 
-        # Match strikes within tolerance: Kalshi strike (positive) to Pinnacle magnitude
-        pinnacle_mags = sorted(pinnacle_lines.keys())
+        # Match strikes within tolerance: Kalshi strike (positive magnitude) to Pinnacle magnitudes
+        pinnacle_mags = sorted(pinnacle_paired_by_mag.keys())
         matched: List[Tuple[float, float]] = []  # (kalshi_strike, pinnacle_mag)
-        for k_strike in sorted(kalshi_by_strike.keys()):
+        for k_strike in sorted(kalshi_candidates_by_strike.keys()):
             best = None
             best_d = None
             for p_mag in pinnacle_mags:
@@ -1134,8 +1186,51 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
         if not matched:
             continue
 
-        # Fetch orderbooks for matched tickers in parallel (one per strike)
-        tickers = [kalshi_by_strike[k].get("ticker") for k, _ in matched if kalshi_by_strike.get(k)]
+        # Choose the Kalshi market ticker to use per strike, then fetch orderbooks once per ticker.
+        # IMPORTANT (per user correction):
+        # Kalshi "TEAM wins by over X" corresponds to TEAM -X (favorite POV) and opponent +X (via NO).
+        # Therefore, we should only match a Kalshi market if Pinnacle(ms7) has that SAME team at -X
+        # for this magnitude. This prevents false matches when Pinnacle has the team as +X (underdog).
+        chosen_market_by_strike: Dict[float, Dict[str, Any]] = {}
+        tickers: List[str] = []
+        for k_strike, p_mag in matched:
+            candidates = kalshi_candidates_by_strike.get(k_strike) or []
+            if not candidates:
+                continue
+            pinp = pinnacle_paired_by_mag.get(p_mag) or {}
+            if not pinp:
+                continue
+
+            # Determine which team is -X per Pinnacle at this magnitude
+            home_line = float(pinp.get("home_line", 0.0))
+            away_line = float(pinp.get("away_line", 0.0))
+
+            favored_code = None
+            if abs(home_line + float(k_strike)) <= STRIKE_MATCH_TOL:
+                favored_code = home_code
+            elif abs(away_line + float(k_strike)) <= STRIKE_MATCH_TOL:
+                favored_code = away_code
+
+            # Filter candidates to those whose TEAM matches the -X side in Pinnacle
+            filtered = []
+            for c in candidates:
+                tc = (c.get("market_team_code") or "").strip()
+                if not tc:
+                    continue
+                if favored_code and tc != favored_code:
+                    continue
+                filtered.append(c)
+
+            if not filtered:
+                # No true overlap at this magnitude (sign mismatch); skip this strike entirely.
+                continue
+
+            chosen = filtered[0]
+            chosen_market_by_strike[k_strike] = chosen
+            t = chosen.get("ticker")
+            if t:
+                tickers.append(t)
+
         orderbooks_by_ticker: Dict[str, Dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=min(len(tickers), 10)) as executor:
             future_to_ticker = {
@@ -1151,65 +1246,86 @@ def build_spreads_rows_for_today(games: Optional[List[Dict[str, Any]]] = None, s
                     orderbooks_by_ticker[t] = {}
 
         for k_strike, p_mag in matched:
-            m = kalshi_by_strike.get(k_strike) or {}
+            m = chosen_market_by_strike.get(k_strike) or {}
             market_ticker = m.get("ticker")
             if not market_ticker:
                 continue
             ob = orderbooks_by_ticker.get(market_ticker) or {}
 
-            # Kalshi: YES = home covers (wins by over X); NO = away covers (+X)
-            home_ob = get_spread_orderbook_data(market_ticker, "YES", orderbook=ob)
-            away_ob = get_spread_orderbook_data(market_ticker, "NO", orderbook=ob)
+            # Kalshi: YES = market team "wins by over X"; NO = opponent side.
+            yes_ob = get_spread_orderbook_data(market_ticker, "YES", orderbook=ob)
+            no_ob = get_spread_orderbook_data(market_ticker, "NO", orderbook=ob)
 
-            home_kalshi_prob = home_ob.get("tob_effective_prob")
-            away_kalshi_prob = away_ob.get("tob_effective_prob")
-            home_kalshi_liq = home_ob.get("tob_liq")
-            away_kalshi_liq = away_ob.get("tob_liq")
-            home_kalshi_price_cents = home_ob.get("tob_bid_cents")
-            away_kalshi_price_cents = away_ob.get("tob_bid_cents")
+            yes_prob = yes_ob.get("tob_effective_prob")
+            no_prob = no_ob.get("tob_effective_prob")
+            yes_liq = yes_ob.get("tob_liq")
+            no_liq = no_ob.get("tob_liq")
+            yes_cents = yes_ob.get("tob_bid_cents")
+            no_cents = no_ob.get("tob_bid_cents")
 
-            pin = pinnacle_lines.get(p_mag, {})
-            home_pin_prob = pin.get("home_prob")
-            away_pin_prob = pin.get("away_prob")
+            pinp = pinnacle_paired_by_mag.get(p_mag, {})
+            home_prob = pinp.get("home_prob")
+            away_prob = pinp.get("away_prob")
+            home_line = float(pinp.get("home_line", -p_mag))
+            away_line = float(pinp.get("away_line", +p_mag))
+
+            market_team_code = (m.get("market_team_code") or "").strip()
+            if market_team_code not in [home_code, away_code]:
+                continue
+            opp_code = away_code if market_team_code == home_code else home_code
+
+            prob_by_code = {home_code: home_prob, away_code: away_prob}
+            line_by_code = {home_code: home_line, away_code: away_line}
+
+            # By construction, market_team_code is the -X side in Pinnacle at this magnitude
+            fav_code = market_team_code
+            dog_code = opp_code
+            fav_prob = prob_by_code.get(fav_code)
+            dog_prob = prob_by_code.get(dog_code)
 
             # Pinnacle POV inversion (like ML/TOTALS): show inverse of opponent price
-            home_pinnacle = (1.0 - away_pin_prob) if away_pin_prob is not None else home_pin_prob
-            away_pinnacle = (1.0 - home_pin_prob) if home_pin_prob is not None else away_pin_prob
+            fav_pinnacle = (1.0 - dog_prob) if dog_prob is not None else fav_prob
+            dog_pinnacle = (1.0 - fav_prob) if fav_prob is not None else dog_prob
 
-            home_ev = (home_pinnacle - home_kalshi_prob) * 100.0 if (home_pinnacle is not None and home_kalshi_prob is not None) else None
-            away_ev = (away_pinnacle - away_kalshi_prob) * 100.0 if (away_pinnacle is not None and away_kalshi_prob is not None) else None
+            fav_ev = (fav_pinnacle - yes_prob) * 100.0 if (fav_pinnacle is not None and yes_prob is not None) else None
+            dog_ev = (dog_pinnacle - no_prob) * 100.0 if (dog_pinnacle is not None and no_prob is not None) else None
 
             base = {
                 "game_date": game.get("game_date"),
                 "event_start": game.get("event_start"),
                 "away_roto": game.get("away_roto"),
+                "home_roto": game.get("home_roto"),
                 "game": game_code,
                 "market": "SPREADS",
             }
 
-            # Home row: home_code -k_strike
+            # Favorite row (YES exposure)
             spread_rows.append({
                 **base,
-                "side": home_code or "HOME",
+                "roto": game.get("home_roto") if fav_code == home_code else game.get("away_roto"),
+                "side": fav_code,
+                # Kalshi semantics: YES = TEAM wins by over X => TEAM -X
                 "line": -float(k_strike),
-                "kalshi_prob": home_kalshi_prob,
-                "kalshi_liq": home_kalshi_liq,
-                "kalshi_price_cents": home_kalshi_price_cents,
-                "pinnacle_prob": home_pinnacle,
-                "ev": home_ev,
+                "kalshi_prob": yes_prob,
+                "kalshi_liq": yes_liq,
+                "kalshi_price_cents": yes_cents,
+                "pinnacle_prob": fav_pinnacle,
+                "ev": fav_ev,
                 "market_ticker": market_ticker,
             })
 
-            # Away row: away_code +k_strike (NO exposure)
+            # Opponent row (NO exposure)
             spread_rows.append({
                 **base,
-                "side": away_code or "AWAY",
+                "roto": game.get("home_roto") if dog_code == home_code else game.get("away_roto"),
+                "side": dog_code,
+                # Opponent POV: +X
                 "line": float(k_strike),
-                "kalshi_prob": away_kalshi_prob,
-                "kalshi_liq": away_kalshi_liq,
-                "kalshi_price_cents": away_kalshi_price_cents,
-                "pinnacle_prob": away_pinnacle,
-                "ev": away_ev,
+                "kalshi_prob": no_prob,
+                "kalshi_liq": no_liq,
+                "kalshi_price_cents": no_cents,
+                "pinnacle_prob": dog_pinnacle,
+                "ev": dog_ev,
                 "market_ticker": market_ticker,
             })
 

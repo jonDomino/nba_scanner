@@ -201,7 +201,8 @@ def determine_away_home_from_kalshi(
             "home_team_name": None,
             "away_fair": None,
             "home_fair": None,
-            "away_roto": None
+            "away_roto": None,
+            "home_roto": None,
         }
     
     # Parse Kalshi event ticker to get canonical away/home codes
@@ -217,7 +218,8 @@ def determine_away_home_from_kalshi(
             "home_team_name": None,
             "away_fair": None,
             "home_fair": None,
-            "away_roto": None
+            "away_roto": None,
+            "home_roto": None,
         }
     
     # Map each Unabated team to its Kalshi code
@@ -243,8 +245,9 @@ def determine_away_home_from_kalshi(
     away_fair = fairs_by_team_id.get(away_team_id) if away_team_id else None
     home_fair = fairs_by_team_id.get(home_team_id) if home_team_id else None
     
-    # Extract rotation number for away team from event_teams_raw
+    # Extract rotation numbers for away/home teams from event_teams_raw
     away_roto = None
+    home_roto = None
     if away_team_id and event_teams_raw and isinstance(event_teams_raw, dict):
         for idx, team_info in event_teams_raw.items():
             if isinstance(team_info, dict):
@@ -264,6 +267,25 @@ def determine_away_home_from_kalshi(
                         except (ValueError, TypeError):
                             away_roto = None
                     break
+
+    if home_team_id and event_teams_raw and isinstance(event_teams_raw, dict):
+        for idx, team_info in event_teams_raw.items():
+            if isinstance(team_info, dict):
+                team_id = team_info.get("id")
+                if team_id == home_team_id:
+                    home_roto = (
+                        team_info.get("rotationNumber") or
+                        team_info.get("rotation") or
+                        team_info.get("rotoNumber") or
+                        team_info.get("roto") or
+                        team_info.get("rot")
+                    )
+                    if home_roto is not None:
+                        try:
+                            home_roto = int(home_roto)
+                        except (ValueError, TypeError):
+                            home_roto = None
+                    break
     
     return {
         "away_team_id": away_team_id,
@@ -273,6 +295,7 @@ def determine_away_home_from_kalshi(
         "away_fair": away_fair,
         "home_fair": home_fair,
         "away_roto": away_roto,
+        "home_roto": home_roto,
         "kalshi_away_code": kalshi_away_code,
         "kalshi_home_code": kalshi_home_code
     }

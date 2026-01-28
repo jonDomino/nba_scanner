@@ -673,15 +673,15 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
             <table>
             <thead>
                 <tr>
-                    <th>Game Date</th>
-                    <th>Game Time</th>
-                    <th>ROTO</th>
-                    <th>Game</th>
-                    <th>Market</th>
-                    <th>Side</th>
-                    <th>Line</th>
-                    <th>Kalshi</th>
-                    <th>Pinnacle</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 0, 'text')">Game Date</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 1, 'text')">Game Time</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 2, 'num')">ROTO</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 3, 'text')">Game</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 4, 'text')">Market</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 5, 'text')">Side</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 6, 'num')">Line</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 7, 'num')">Kalshi</th>
+                    <th class="sortable" onclick="sortTable('consolidatedTable', 8, 'num')">Pinnacle</th>
                     <th class="sortable" onclick="sortTable('consolidatedTable', 9, 'num')">EV</th>
                     <th class="sortable" onclick="sortTable('consolidatedTable', 10, 'num')">Liq</th>
                 </tr>
@@ -814,8 +814,11 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         liq_pct = calc_liq_bar_pct(dollar_liq, max_dollar_liq)
         liq_gradient = calc_liq_gradient(dollar_liq, max_dollar_liq)
 
-        away_roto = row.get('away_roto')
-        away_roto_str = str(away_roto) if away_roto is not None else "N/A"
+        roto = row.get('roto')
+        if roto is None:
+            # backward-compat fallback
+            roto = row.get('away_roto')
+        roto_str = str(roto) if roto is not None else "N/A"
 
         event_start = row.get('event_start')
         game_time_str = format_game_time_pst(event_start)
@@ -832,7 +835,7 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
                 <tr class="{row_class}">
                     <td class="date-cell">{row.get('game_date') or ''}</td>
                     <td class="date-cell">{game_time_str}</td>
-                    <td class="prob-value">{away_roto_str}</td>
+                    <td class="prob-value">{roto_str}</td>
                     <td class="team-name">{game_code}</td>
                     <td class="prob-value">{market}</td>
                     <td class="prob-value">{side}</td>

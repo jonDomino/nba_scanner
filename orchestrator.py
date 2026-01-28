@@ -140,10 +140,14 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         home_code = game.get("kalshi_home_code") or ""
         game_code = f"{away_code}@{home_code}" if (away_code and home_code) else ""
 
+        away_roto = game.get("away_roto")
+        home_roto = game.get("home_roto")
+
         base = {
             "game_date": game.get("game_date", "N/A"),
             "event_start": game.get("event_start"),
             "away_roto": game.get("away_roto"),
+            "home_roto": game.get("home_roto"),
             "event_ticker": event_ticker or None,
             "game": game_code,
             "market": "ML",
@@ -153,6 +157,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         # Away side row
         moneyline_rows.append({
             **base,
+            "roto": away_roto,
             "side": away_code or "AWAY",
             "kalshi_prob": yes_be_top_away,
             "kalshi_liq": yes_bid_top_liq_away,
@@ -165,6 +170,7 @@ def build_moneylines_rows(games: List[Dict[str, Any]], debug: bool = False) -> L
         # Home side row
         moneyline_rows.append({
             **base,
+            "roto": home_roto,
             "side": home_code or "HOME",
             "kalshi_prob": yes_be_top_home,
             "kalshi_liq": yes_bid_top_liq_home,
