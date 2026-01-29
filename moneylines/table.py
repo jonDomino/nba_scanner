@@ -168,7 +168,7 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NBA Value Dashboard</title>
+    <title>Kalshi Value Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -661,7 +661,7 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
 <body>
     <div class="dashboard-container">
         <div class="header-container">
-            <h1>NBA VALUE DASHBOARD</h1>
+            <h1>KALSHI VALUE DASHBOARD</h1>
             <button class="toggle-button" id="oddsToggleBtn" onclick="toggleOddsFormat()">Change odds type</button>
         </div>
         <div class="table-section">
@@ -935,7 +935,7 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
     )
     
     print("\n" + "=" * len(header.expandtabs()))
-    print("NBA VALUE DASHBOARD")
+    print("KALSHI VALUE DASHBOARD")
     print("=" * len(header.expandtabs()))
     print(header)
     print("-" * len(header.expandtabs()))

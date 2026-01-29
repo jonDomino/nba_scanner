@@ -61,10 +61,11 @@ except Exception:
     pass
 
 from orchestrator import build_all_rows, build_dashboard_html_all
+from cbb.orchestrator_cbb import build_all_rows_cbb
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="NBA Value Dashboard",
+    page_title="Kalshi Value Dashboard",
     page_icon="🏀",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -72,7 +73,7 @@ st.set_page_config(
 
 # Cache data with TTL to reduce API calls
 @st.cache_data(ttl=30)  # Cache for 30 seconds
-def get_cached_rows():
+def get_cached_rows_nba():
     """
     Build and cache the raw dashboard rows (HTML is built after applying UI filters).
     
@@ -87,6 +88,21 @@ def get_cached_rows():
         st.error(f"Error building dashboard: {e}")
         st.stop()
         return None, None, None, None
+
+
+@st.cache_data(ttl=30)  # Cache for 30 seconds
+def get_cached_rows_cbb():
+    """
+    Build and cache the raw CBB dashboard rows (HTML is built after applying UI filters).
+    Kept separate from NBA cache to avoid any coupling.
+    """
+    try:
+        moneyline_rows, spread_rows, totals_rows = build_all_rows_cbb(debug=False)
+        timestamp = datetime.now()
+        return moneyline_rows, spread_rows, totals_rows, timestamp
+    except Exception as e:
+        # Never break the NBA page due to CBB build issues
+        return [], [], [], datetime.now()
 
 
 def _calc_dollar_liq(row: Dict[str, Any]) -> Optional[float]:
@@ -119,7 +135,7 @@ def _filter_rows_by_liq(rows: Optional[List[Dict[str, Any]]], min_dollars: float
 
 def main():
     """Main Streamlit app function."""
-    st.title("🏀 NBA Value Dashboard")
+    st.title("🏀 Kalshi Value Dashboard")
     
     # Debug: Show secrets status (only in Streamlit Cloud for debugging)
     if hasattr(st, 'secrets'):
@@ -179,7 +195,8 @@ def main():
         
         if st.button("🔄 Refresh Now", type="primary"):
             # Clear cache and rebuild
-            get_cached_rows.clear()
+            get_cached_rows_nba.clear()
+            get_cached_rows_cbb.clear()
             st.rerun()
         
         st.markdown("---")
@@ -195,39 +212,38 @@ def main():
         help="Filter rows by TOB dollar liquidity: (price_cents/100) * contracts",
     )
     
-    # Get cached raw data
-    moneyline_rows, spread_rows, totals_rows, timestamp = get_cached_rows()
-    
-    if moneyline_rows is None:
-        st.error("Failed to load dashboard data.")
-        return
+    tabs = st.tabs(["NBA", "CBB"])
 
-    # Apply liquidity filter to all markets
-    moneyline_rows_f = _filter_rows_by_liq(moneyline_rows, liq_min)
-    spread_rows_f = _filter_rows_by_liq(spread_rows, liq_min) if spread_rows else []
-    totals_rows_f = _filter_rows_by_liq(totals_rows, liq_min) if totals_rows else []
+    def _render_tab(league: str):
+        if league == "NBA":
+            moneyline_rows, spread_rows, totals_rows, timestamp = get_cached_rows_nba()
+        else:
+            moneyline_rows, spread_rows, totals_rows, timestamp = get_cached_rows_cbb()
 
-    html = build_dashboard_html_all(moneyline_rows_f, spread_rows_f, totals_rows_f)
-    
-    # Display last updated timestamp
-    if timestamp:
-        st.caption(f"Last updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} PST")
-    
-    # Display counts (consolidated)
-    consolidated_rows = (moneyline_rows_f or []) + (spread_rows_f or []) + (totals_rows_f or [])
-    consolidated_games = len({r.get("event_start") for r in consolidated_rows if isinstance(r, dict) and r.get("event_start")}) if consolidated_rows else 0
-    st.info(f"Showing {len(consolidated_rows)} row(s) across {consolidated_games} game(s) (liq ≥ ${int(liq_min):,})")
-    
-    # Embed HTML dashboard.
-    #
-    # NOTE: Streamlit iframe auto-resize via postMessage is not consistent across Streamlit versions.
-    # To ensure the consolidated table is not truncated (and avoid an internal scrollbar),
-    # allocate a large enough height based on the number of rows.
-    #
-    # The Streamlit page can still scroll normally.
-    iframe_height = int(500 + (len(consolidated_rows) * 48))
-    iframe_height = max(900, min(30000, iframe_height))
-    st.components.v1.html(html, height=iframe_height, scrolling=False)
+        # Apply liquidity filter to all markets
+        moneyline_rows_f = _filter_rows_by_liq(moneyline_rows, liq_min)
+        spread_rows_f = _filter_rows_by_liq(spread_rows, liq_min) if spread_rows else []
+        totals_rows_f = _filter_rows_by_liq(totals_rows, liq_min) if totals_rows else []
+
+        html = build_dashboard_html_all(moneyline_rows_f, spread_rows_f, totals_rows_f)
+
+        # Display last updated timestamp
+        if timestamp:
+            st.caption(f"{league} last updated: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} PST")
+
+        # Display counts (consolidated)
+        consolidated_rows = (moneyline_rows_f or []) + (spread_rows_f or []) + (totals_rows_f or [])
+        consolidated_games = len({r.get("event_start") for r in consolidated_rows if isinstance(r, dict) and r.get("event_start")}) if consolidated_rows else 0
+        st.info(f"Showing {len(consolidated_rows)} row(s) across {consolidated_games} game(s) (liq ≥ ${int(liq_min):,})")
+
+        iframe_height = int(500 + (len(consolidated_rows) * 48))
+        iframe_height = max(900, min(30000, iframe_height))
+        st.components.v1.html(html, height=iframe_height, scrolling=False)
+
+    with tabs[0]:
+        _render_tab("NBA")
+    with tabs[1]:
+        _render_tab("CBB")
     
     # Footer
     st.markdown("---")
