@@ -6,7 +6,15 @@ It should not modify or depend on NBA-specific parsing assumptions.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from zoneinfo import ZoneInfo
+    USE_PYTZ = False
+except ImportError:  # pragma: no cover
+    import pytz  # type: ignore
+    USE_PYTZ = True
 
 from utils.kalshi_api import load_creds
 
@@ -28,6 +36,63 @@ from cbb.kalshi_series import (
 )
 
 from spreads.builder import _pair_pinnacle_spreads_by_overround  # reuse generic pairing helper
+
+
+def _utc_to_pst_datetime(utc_timestamp: str) -> Optional[datetime]:
+    """
+    Convert an ISO UTC timestamp (with or without trailing 'Z') into America/Los_Angeles datetime.
+    Returns None on parse failure.
+    """
+    if not utc_timestamp:
+        return None
+    try:
+        dt_utc = datetime.fromisoformat(str(utc_timestamp).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+    if USE_PYTZ:
+        utc_tz = pytz.UTC  # type: ignore[name-defined]
+        pacific_tz = pytz.timezone("America/Los_Angeles")  # type: ignore[name-defined]
+        if dt_utc.tzinfo is None:
+            dt_utc = utc_tz.localize(dt_utc)
+        else:
+            dt_utc = dt_utc.astimezone(utc_tz)
+        return dt_utc.astimezone(pacific_tz)
+
+    utc_tz = ZoneInfo("UTC")
+    pacific_tz = ZoneInfo("America/Los_Angeles")
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=utc_tz)
+    else:
+        dt_utc = dt_utc.astimezone(utc_tz)
+    return dt_utc.astimezone(pacific_tz)
+
+
+def _extract_roto_for_team_id(unab_ev: Dict[str, Any], team_id: Optional[int]) -> Optional[int]:
+    if team_id is None:
+        return None
+    et = unab_ev.get("eventTeams", {})
+    if not isinstance(et, dict):
+        return None
+    for _, team_info in et.items():
+        if not isinstance(team_info, dict):
+            continue
+        if team_info.get("id") != team_id:
+            continue
+        roto_val = (
+            team_info.get("rotationNumber")
+            or team_info.get("rotation")
+            or team_info.get("rotoNumber")
+            or team_info.get("roto")
+            or team_info.get("rot")
+        )
+        if roto_val is None:
+            return None
+        try:
+            return int(roto_val)
+        except Exception:
+            return None
+    return None
 
 
 def _extract_ms7_moneyline_probs(event: Dict[str, Any]) -> Dict[int, float]:
@@ -169,6 +234,7 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
     for ev in game_events[:120]:
         event_ticker = ev.get("event_ticker")
         title = ev.get("title") or ""
+        kalshi_event_start = ev.get("event_start")  # Kalshi market close_time (game start)
         parsed = parse_kalshi_matchup_title(title)
         if not event_ticker or not parsed:
             continue
@@ -186,6 +252,12 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         unab_ev = _find_unabated_cbb_event(snapshot, away_name, home_name, overrides, away_code, home_code)
         if not unab_ev:
             continue
+
+        # CBB: use Kalshi-provided start time directly (no +10m adjustment).
+        # Fall back to Unabated eventStart if missing for some reason.
+        event_start = kalshi_event_start or unab_ev.get("eventStart")
+        dt_pst = _utc_to_pst_datetime(str(event_start)) if event_start else None
+        game_date = dt_pst.strftime("%Y-%m-%d") if dt_pst else None
 
         # -----------------
         # CBB Moneylines
@@ -219,20 +291,25 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         away_pinnacle = (1.0 - home_pin) if home_pin is not None else away_pin
         home_pinnacle = (1.0 - away_pin) if away_pin is not None else home_pin
 
+        away_roto = _extract_roto_for_team_id(unab_ev, away_id)
+        home_roto = _extract_roto_for_team_id(unab_ev, home_id)
+
         base_ml = {
-            "game_date": None,
-            "event_start": unab_ev.get("eventStart"),
-            "away_roto": None,
-            "home_roto": None,
-            "roto": None,
+            "league": "CBB",
+            "game_date": game_date,
+            "event_start": event_start,
+            "away_roto": away_roto,
+            "home_roto": home_roto,
             "game": game_code,
             "market": "ML",
             "line": None,
+            "event_ticker": event_ticker,
         }
 
         moneyline_rows.append({
             **base_ml,
             "side": away_code,
+            "roto": away_roto,
             "kalshi_prob": away_ob.get("tob_effective_prob"),
             "kalshi_liq": away_ob.get("tob_liq"),
             "kalshi_price_cents": away_ob.get("tob_bid_cents"),
@@ -244,6 +321,7 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         moneyline_rows.append({
             **base_ml,
             "side": home_code,
+            "roto": home_roto,
             "kalshi_prob": home_ob.get("tob_effective_prob"),
             "kalshi_liq": home_ob.get("tob_liq"),
             "kalshi_price_cents": home_ob.get("tob_bid_cents"),
@@ -307,20 +385,22 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                 under_pinnacle = (1.0 - over_pin) if over_pin is not None else under_pin
 
                 base_t = {
-                    "game_date": None,
-                    "event_start": unab_ev.get("eventStart"),
-                    "away_roto": None,
-                    "home_roto": None,
-                    "roto": None,
+                    "league": "CBB",
+                    "game_date": game_date,
+                    "event_start": event_start,
+                    "away_roto": away_roto,
+                    "home_roto": home_roto,
                     "game": game_code,
                     "market": "TOTALS",
                     "line": float(p_pts),
                     "market_ticker": str(ticker),
+                    "event_ticker": event_ticker,
                 }
 
                 totals_rows.append({
                     **base_t,
                     "side": "OVER",
+                    "roto": away_roto,
                     "kalshi_prob": yes_ob.get("tob_effective_prob"),
                     "kalshi_liq": yes_ob.get("tob_liq"),
                     "kalshi_price_cents": yes_ob.get("tob_bid_cents"),
@@ -330,6 +410,7 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                 totals_rows.append({
                     **base_t,
                     "side": "UNDER",
+                    "roto": home_roto,
                     "kalshi_prob": no_ob.get("tob_effective_prob"),
                     "kalshi_liq": no_ob.get("tob_liq"),
                     "kalshi_price_cents": no_ob.get("tob_bid_cents"),
@@ -425,19 +506,21 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                 dog_pinnacle = (1.0 - fav_prob) if fav_prob is not None else dog_prob
 
                 base_s = {
-                    "game_date": None,
-                    "event_start": unab_ev.get("eventStart"),
-                    "away_roto": None,
-                    "home_roto": None,
-                    "roto": None,
+                    "league": "CBB",
+                    "game_date": game_date,
+                    "event_start": event_start,
+                    "away_roto": away_roto,
+                    "home_roto": home_roto,
                     "game": game_code,
                     "market": "SPREADS",
                     "market_ticker": str(ticker),
+                    "event_ticker": event_ticker,
                 }
                 spread_rows.append({
                     **base_s,
                     "side": market_team,
                     "line": -float(k_strike),
+                    "roto": (away_roto if market_team == away_code else home_roto),
                     "kalshi_prob": yes_ob.get("tob_effective_prob"),
                     "kalshi_liq": yes_ob.get("tob_liq"),
                     "kalshi_price_cents": yes_ob.get("tob_bid_cents"),
@@ -448,6 +531,7 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                     **base_s,
                     "side": opp,
                     "line": float(k_strike),
+                    "roto": (away_roto if opp == away_code else home_roto),
                     "kalshi_prob": no_ob.get("tob_effective_prob"),
                     "kalshi_liq": no_ob.get("tob_liq"),
                     "kalshi_price_cents": no_ob.get("tob_bid_cents"),

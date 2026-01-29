@@ -97,18 +97,20 @@ def utc_to_pst_datetime(utc_timestamp: str) -> datetime:
         return dt_utc.astimezone(pacific_tz)
 
 
-def format_game_time_pst(event_start: Optional[str]) -> str:
+def format_game_time_pst(event_start: Optional[str], league: Optional[str] = None) -> str:
     """Format game time as PST/PDT in hh:mm am/pm format.
     
-    Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    NBA: Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    CBB: Kalshi start times are correct; do NOT apply the +10m adjustment.
     """
     if not event_start:
         return "N/A"
     
     try:
         dt_pst = utc_to_pst_datetime(event_start)
-        # Add 10 minutes (Unabated shows time 10 minutes early)
-        dt_pst = dt_pst + timedelta(minutes=10)
+        # Add 10 minutes (Unabated shows time 10 minutes early) - NBA only
+        if (league or "NBA").upper() == "NBA":
+            dt_pst = dt_pst + timedelta(minutes=10)
         # Format as hh:mm am/pm (12-hour format)
         time_str = dt_pst.strftime("%I:%M %p")
         # Remove leading zero only from single-digit hours (e.g., "09:30 AM" -> "9:30 AM")
@@ -119,18 +121,20 @@ def format_game_time_pst(event_start: Optional[str]) -> str:
         return "N/A"
 
 
-def is_game_started(event_start: Optional[str]) -> bool:
+def is_game_started(event_start: Optional[str], league: Optional[str] = None) -> bool:
     """Check if game has already started (current time > game time + 10 minutes).
     
-    Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    NBA: Adds 10 minutes to Unabated's reported time (canonical adjustment).
+    CBB: Kalshi start times are correct; do NOT apply the +10m adjustment.
     """
     if not event_start:
         return False
     
     try:
         game_time = utc_to_pst_datetime(event_start)
-        # Add 10 minutes (Unabated shows time 10 minutes early)
-        game_time = game_time + timedelta(minutes=10)
+        # Add 10 minutes (Unabated shows time 10 minutes early) - NBA only
+        if (league or "NBA").upper() == "NBA":
+            game_time = game_time + timedelta(minutes=10)
         if USE_PYTZ:
             import pytz
             now = datetime.now(pytz.timezone("America/Los_Angeles"))
@@ -821,8 +825,9 @@ def create_html_dashboard(table_rows: List[Dict[str, Any]], spread_rows: List[Di
         roto_str = str(roto) if roto is not None else "N/A"
 
         event_start = row.get('event_start')
-        game_time_str = format_game_time_pst(event_start)
-        is_started = is_game_started(event_start)
+        league = row.get('league')
+        game_time_str = format_game_time_pst(event_start, league=league)
+        is_started = is_game_started(event_start, league=league)
         row_class = "game-started" if is_started else ""
 
         if is_started:
@@ -960,8 +965,9 @@ def print_dashboard(table_rows: List[Dict[str, Any]]):
         
         away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
         event_start = row.get('event_start')
-        game_time_str = format_game_time_pst(event_start)
-        is_started = is_game_started(event_start)
+        league = row.get('league')
+        game_time_str = format_game_time_pst(event_start, league=league)
+        is_started = is_game_started(event_start, league=league)
         started_marker = " *" if is_started else ""
         
         # Blank out pinnacle and EV for started games
@@ -1119,8 +1125,9 @@ def main():
         
         away_roto_str = str(row.get('away_roto', 'N/A')) if row.get('away_roto') is not None else "N/A"
         event_start = row.get('event_start')
-        game_time_str = format_game_time_pst(event_start)
-        is_started = is_game_started(event_start)
+        league = row.get('league')
+        game_time_str = format_game_time_pst(event_start, league=league)
+        is_started = is_game_started(event_start, league=league)
         started_marker = " *" if is_started else ""
         
         # Blank out fair odds and EVs for started games

@@ -38,6 +38,18 @@ def fetch_cbb_game_events(api_key_id: str, private_key_pem: str) -> List[Dict[st
         if len(uniq) < 2:
             continue
         t1, t2 = uniq[0], uniq[1]
+
+        # Kalshi market close_time corresponds to game start for sports markets.
+        # (CBB: user confirmed Kalshi start times are correct — no canonical +10m adjustment needed.)
+        close_time = None
+        for m in team_markets:
+            if not isinstance(m, dict):
+                continue
+            if (m.get("ticker") == t1) or (m.get("ticker") == t2):
+                ct = m.get("close_time")
+                if ct:
+                    close_time = ct
+                    break
         c1 = t1.split("-")[-1].upper()
         c2 = t2.split("-")[-1].upper()
 
@@ -65,6 +77,7 @@ def fetch_cbb_game_events(api_key_id: str, private_key_pem: str) -> List[Dict[st
             "home_code": home_code,
             "away_market_ticker": away_ticker,
             "home_market_ticker": home_ticker,
+            "event_start": close_time,
         })
     return out
 
