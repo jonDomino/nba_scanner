@@ -140,6 +140,31 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
     totals_rows: List[Dict[str, Any]] = []
     spread_rows: List[Dict[str, Any]] = []
 
+    def _fetch_orderbooks_many(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch many Kalshi orderbooks concurrently, with per-ticker caching.
+        Returns ticker -> orderbook dict.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        uniq: List[str] = []
+        for t in tickers:
+            if t and t not in out and t not in uniq:
+                uniq.append(t)
+
+        if not uniq:
+            return out
+
+        # Keep this conservative to avoid rate limits for CBB volume.
+        max_workers = 8
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(_fetch_orderbook_with_cache, t, api_key_id, private_key_pem): t for t in uniq}
+            for fut, t in futs.items():
+                try:
+                    out[t] = fut.result() or {}
+                except Exception:
+                    out[t] = {}
+        return out
+
     # Limit to a reasonable number to avoid huge API load during early iteration
     for ev in game_events[:120]:
         event_ticker = ev.get("event_ticker")
@@ -165,10 +190,8 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         # -----------------
         # CBB Moneylines
         # -----------------
-        # Kalshi orderbooks for the two winner markets
-        orderbooks = {}
-        for t in [away_market_ticker, home_market_ticker]:
-            orderbooks[t] = _fetch_orderbook_with_cache(t, api_key_id, private_key_pem) or {}
+        # Kalshi orderbooks for the two winner markets (concurrent + cached)
+        orderbooks = _fetch_orderbooks_many([away_market_ticker, home_market_ticker])
 
         away_ob = get_spread_orderbook_data(away_market_ticker, "YES", orderbook=orderbooks[away_market_ticker])
         home_ob = get_spread_orderbook_data(home_market_ticker, "YES", orderbook=orderbooks[home_market_ticker])
@@ -232,9 +255,13 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         # -----------------
         # CBB Totals
         # -----------------
+        # Speedup: derive the strike universe from Unabated first, then only fetch orderbooks
+        # for Kalshi markets that match those strikes (instead of iterating all Kalshi strikes).
+        pin_tot = _extract_pinnacle_totals_alt_lines_ms7(unab_ev)
+
         totals_event_ticker = cbb_game_to_totals_event_ticker(event_ticker)
         totals_markets = fetch_markets_for_event(api_key_id, private_key_pem, totals_event_ticker)
-        by_strike = {}
+        by_strike: Dict[float, Dict[str, Any]] = {}
         for m in totals_markets:
             strike = parse_cbb_totals_strike(m)
             t = m.get("ticker")
@@ -242,28 +269,38 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                 continue
             by_strike[float(strike)] = m
 
-        pin_tot = _extract_pinnacle_totals_alt_lines_ms7(unab_ev)
         if by_strike and pin_tot:
-            # match by exact strike within small tolerance
-            for k_strike, m in by_strike.items():
-                # find closest pin points
-                best = None
+            # Inner join Kalshi strikes to Unabated strikes within a tolerance, but *drive the loop*
+            # from Unabated to avoid touching extraneous Kalshi strikes/orderbooks.
+            matched: List[Tuple[float, Dict[str, Any]]] = []
+            for p_pts in pin_tot.keys():
+                best_k = None
                 best_d = None
-                for p_pts in pin_tot.keys():
-                    d = abs(float(p_pts) - float(k_strike))
+                for k_strike in by_strike.keys():
+                    d = abs(float(k_strike) - float(p_pts))
                     if d <= 0.26 and (best_d is None or d < best_d):
-                        best = p_pts
+                        best_k = float(k_strike)
                         best_d = d
-                if best is None:
+                if best_k is None:
                     continue
+                matched.append((float(p_pts), by_strike[best_k]))
+
+            tickers_to_fetch = []
+            for _, m in matched:
+                t = m.get("ticker")
+                if t:
+                    tickers_to_fetch.append(str(t))
+            obs = _fetch_orderbooks_many(tickers_to_fetch)
+
+            for p_pts, m in matched:
                 ticker = m.get("ticker")
                 if not ticker:
                     continue
-                ob = _fetch_orderbook_with_cache(ticker, api_key_id, private_key_pem) or {}
-                yes_ob = get_spread_orderbook_data(ticker, "YES", orderbook=ob)
-                no_ob = get_spread_orderbook_data(ticker, "NO", orderbook=ob)
+                ob = obs.get(str(ticker), {}) or {}
+                yes_ob = get_spread_orderbook_data(str(ticker), "YES", orderbook=ob)
+                no_ob = get_spread_orderbook_data(str(ticker), "NO", orderbook=ob)
 
-                pin = pin_tot.get(best) or {}
+                pin = pin_tot.get(p_pts) or {}
                 over_pin = pin.get("over_prob")
                 under_pin = pin.get("under_prob")
                 over_pinnacle = (1.0 - under_pin) if under_pin is not None else over_pin
@@ -277,8 +314,8 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                     "roto": None,
                     "game": game_code,
                     "market": "TOTALS",
-                    "line": float(best),
-                    "market_ticker": ticker,
+                    "line": float(p_pts),
+                    "market_ticker": str(ticker),
                 }
 
                 totals_rows.append({
@@ -303,6 +340,8 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         # -----------------
         # CBB Spreads
         # -----------------
+        # Speedup: same concept as totals — drive matching from Unabated magnitudes so we only
+        # pull orderbooks for strikes Unabated actually provides.
         spreads_event_ticker = cbb_game_to_spreads_event_ticker(event_ticker)
         spread_markets = fetch_markets_for_event(api_key_id, private_key_pem, spreads_event_ticker)
         candidates_by_strike: Dict[float, List[Dict[str, Any]]] = {}
@@ -319,28 +358,33 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
         pin_sp_raw = _extract_pinnacle_spreads_alt_lines_ms7(unab_ev, home_id, away_id)
         pin_sp = _pair_pinnacle_spreads_by_overround(pin_sp_raw)
         if candidates_by_strike and pin_sp:
-            for k_strike, candidates in candidates_by_strike.items():
-                # match magnitude to Pinnacle mags
-                best = None
-                best_d = None
-                for p_mag in pin_sp.keys():
-                    d = abs(float(p_mag) - float(k_strike))
-                    if d <= 0.26 and (best_d is None or d < best_d):
-                        best = p_mag
-                        best_d = d
-                if best is None:
-                    continue
-                pinp = pin_sp.get(best) or {}
+            # Match each Unabated magnitude to the closest Kalshi strike and choose the correct
+            # "wins by over X" market based on which team is -X in Pinnacle.
+            chosen_markets: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+            for p_mag, pinp in pin_sp.items():
                 if not pinp:
                     continue
+                best_k = None
+                best_d = None
+                for k_strike in candidates_by_strike.keys():
+                    d = abs(float(k_strike) - float(p_mag))
+                    if d <= 0.26 and (best_d is None or d < best_d):
+                        best_k = float(k_strike)
+                        best_d = d
+                if best_k is None:
+                    continue
 
-                # Determine which team is -X in Pinnacle
+                candidates = candidates_by_strike.get(best_k, [])
+                if not candidates:
+                    continue
+
+                # Determine which team is -X in Pinnacle for this magnitude.
                 home_line = float(pinp.get("home_line", 0.0))
                 away_line = float(pinp.get("away_line", 0.0))
                 favored_code = None
-                if abs(home_line + float(k_strike)) <= 0.26:
+                if abs(home_line + float(best_k)) <= 0.26:
                     favored_code = home_code
-                elif abs(away_line + float(k_strike)) <= 0.26:
+                elif abs(away_line + float(best_k)) <= 0.26:
                     favored_code = away_code
 
                 chosen = None
@@ -353,15 +397,25 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                 if not chosen:
                     continue
 
+                chosen_markets.append((float(best_k), chosen, pinp))
+
+            tickers_to_fetch = []
+            for _, m, _ in chosen_markets:
+                t = m.get("ticker")
+                if t:
+                    tickers_to_fetch.append(str(t))
+            obs = _fetch_orderbooks_many(tickers_to_fetch)
+
+            for k_strike, chosen, pinp in chosen_markets:
                 ticker = chosen.get("ticker")
                 market_team = (chosen.get("market_team_code") or "").strip()
                 if not ticker or market_team not in [away_code, home_code]:
                     continue
                 opp = away_code if market_team == home_code else home_code
 
-                ob = _fetch_orderbook_with_cache(ticker, api_key_id, private_key_pem) or {}
-                yes_ob = get_spread_orderbook_data(ticker, "YES", orderbook=ob)
-                no_ob = get_spread_orderbook_data(ticker, "NO", orderbook=ob)
+                ob = obs.get(str(ticker), {}) or {}
+                yes_ob = get_spread_orderbook_data(str(ticker), "YES", orderbook=ob)
+                no_ob = get_spread_orderbook_data(str(ticker), "NO", orderbook=ob)
 
                 prob_by_code = {home_code: pinp.get("home_prob"), away_code: pinp.get("away_prob")}
                 fav_prob = prob_by_code.get(market_team)
@@ -378,7 +432,7 @@ def build_all_rows_cbb(debug: bool = False) -> Tuple[List[Dict[str, Any]], List[
                     "roto": None,
                     "game": game_code,
                     "market": "SPREADS",
-                    "market_ticker": ticker,
+                    "market_ticker": str(ticker),
                 }
                 spread_rows.append({
                     **base_s,
